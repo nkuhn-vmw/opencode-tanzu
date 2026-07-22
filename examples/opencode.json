@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "tanzu": {
+      "name": "Tanzu Platform",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://genai-proxy.sys.<foundation>/<instance>/openai/v1",
+        "apiKey": "{file:/absolute/path/to/your/token}"
+      },
+      "models": {
+        "your-model-id-here": {
+          "name": "Your Model (Tanzu)",
+          "tool_call": true,
+          "limit": { "context": 262144, "output": 32768 }
+        }
+      }
+    }
+  }
+}

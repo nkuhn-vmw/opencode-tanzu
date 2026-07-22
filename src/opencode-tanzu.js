@@ -1,0 +1,468 @@
+/**
+ * opencode v1 plugin: registers the "tanzu" provider.
+ *
+ * ---------------------------------------------------------------------------
+ * TASK 3 / STEP 1 FINDING — how the `config` hook gets what the `auth` prompt
+ * collected. Investigated against opencode 1.18.1 (installed locally) and the
+ * `goniz/opencode-local-provider` precedent. Conclusions are empirical:
+ *
+ *   Candidate 1 — "PluginInput.client exposes stored auth": FALSE.
+ *     @opencode-ai/sdk's client `auth` namespace is write-only for our purpose:
+ *     { remove, start, callback, authenticate, set } — `set` writes, and the
+ *     rest are MCP OAuth. There is NO auth read/get/list method. Verified in
+ *     dist/gen/sdk.gen.d.ts (class Auth) and by walking a live client object.
+ *
+ *   Candidate 2 — "auth.loader supplies options": TRUE, and now load-bearing.
+ *     The type is real: loader?: (auth: () => Promise<Auth>, provider: Provider)
+ *     => Promise<Record<string, any>>, and it does fire for a novel id (config
+ *     hook creates the entry at provider.ts:1418, loader runs at :1542). It CAN
+ *     read the auth store. But it returns `options` only and runs long after the
+ *     config hook has already had to decide the model roster — so it can carry
+ *     credentials for *inference*, never for *discovery*. We use it for exactly
+ *     that: a base URL with no key registers the provider off the bundled table
+ *     and the loader supplies the key at inference time (see `loader` below).
+ *
+ *   Candidate 3 — "read auth.json directly": rejected, brittle, not needed.
+ *
+ *   What the precedent ACTUALLY does (a fourth path, and the one we adopt):
+ *     it never bridges auth -> config at all. Its `authorize()` persists the URL
+ *     into opencode's *config file* via the v2 SDK's global.config.update(), and
+ *     its `config` hook reads it straight back off the `cfg` object opencode
+ *     passes in (cfg.provider.local.options.targets). The round-trip is
+ *     config -> disk -> config. Its authorize() even returns key: "".
+ *
+ * We implement that same bridge with ZERO dependencies:
+ *   - READ is free: `cfg.provider.tanzu.options` is just the Config handed to
+ *     the config hook; no SDK needed.
+ *   - WRITE needs `/global/config`, which the v1 client does NOT expose (its
+ *     `global` namespace has only `event`; its `config.update` is PATCH /config,
+ *     which I verified returns 200 but does NOT persist). That is precisely why
+ *     the precedent builds a v2 client. We cannot add that dependency, so we
+ *     PATCH /global/config directly, reusing the injected client's own transport
+ *     (fetch + headers) so a password-protected server still works.
+ *
+ * ---------------------------------------------------------------------------
+ * REVIEW FIX — THE CLIENT FETCH IS REQUEST-ONLY. Read this before touching
+ * `persistOptions`. `createOpencodeClient` injects
+ *
+ *     const customFetch = (req) => { req.timeout = false; return fetch(req) }
+ *
+ * (sdk/dist/client.js) and the client config types it `fetch?: (request:
+ * Request) => ReturnType<typeof fetch>`. It is **arity 1**. Calling
+ * `doFetch(url, init)` silently discards `init` — the wire request degrades to a
+ * bare `GET /global/config`, which is a real 200 route. `res.ok` is then true,
+ * `authorize` reports success, and nothing is written. A status code is not
+ * proof of a write. So: build a `Request`, pass it as the ONLY argument, and
+ * verify the merged config echoed back actually contains what we sent.
+ *
+ * SECRETS DO NOT GO IN THE CONFIG FILE, AND NEITHER DOES A `{file:…}` POINTER
+ * AT ONE. The key is written to a 0600 file under opencode's own data dir and
+ * the persisted config names no key AT ALL — `authorize` persists `baseURL` and
+ * nothing else. The config hook reads the key file ITSELF (see `readKeyFile`).
+ *
+ * Do not "helpfully" reintroduce `"apiKey": "{file:<path>}"` here. It was tried,
+ * and it bricks opencode: config `{file:…}` references are resolved AND
+ * validated before any plugin loads, so if the key file goes missing —
+ * `opencode uninstall --keep-config` removes the data dir and keeps the config,
+ * an exact path into this — opencode refuses to start for EVERY provider:
+ *
+ *     Error: Configuration is invalid at ~/.config/opencode/opencode.json:
+ *       bad file reference: "{file:/…/apikey}" /…/apikey does not exist
+ *
+ * and a plugin cannot guard against it, because with a dangling reference no
+ * plugin runs at all. Only hand-editing the JSON recovers. `{file:…}` earns its
+ * place in a *committed* config like this repo's `foundations/cdc/opencode.json`,
+ * where there is no plugin to do the reading. Here the plugin IS present, so the
+ * indirection buys nothing and costs a brick. A missing key file is now an
+ * ordinary handled condition: bundled roster, a message, never a crash.
+ *
+ * (opencode still resolves `{file:…}` in a config it loads, before this hook
+ * runs — verified on 1.18.1: config load runs `substitute({text, type:"path",…})`
+ * over the raw file text and only then parses it. So an `options.apiKey` that
+ * reaches us from a committed config is always already-resolved plaintext, which
+ * is why `readCredentials` reads it as a plain string and no `{file:…}` parsing
+ * belongs in this file.)
+ * ---------------------------------------------------------------------------
+ *
+ * Credential precedence in the config hook is therefore:
+ *   1. cfg.provider.tanzu.options.baseURL / .apiKey  (hand-written, e.g. octnz's
+ *      foundations/<f>/opencode.json; only baseURL is ever persisted by us)
+ *   2. TANZU_GENAI_BASE_URL / TANZU_GENAI_API_KEY  (the spike-verified fallback)
+ *   3. the key file written by `authorize`, read directly (key only)
+ *   4. the auth store, via `loader`, for the key only (inference, not discovery)
+ *
+ * NOTE: no `provider.models` hook. Its loop runs before config extension in
+ * opencode's provider.ts, so it can never fire for a novel id like "tanzu".
+ */
+
+import { readFileSync } from "node:fs"
+import { chmod, mkdir, writeFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+
+import { resolveModels, TABLE } from "./opencode-tanzu-capabilities.js"
+import { discoverModels, DiscoveryError } from "./opencode-tanzu-discovery.js"
+
+// Former src/index.js entry point, folded in so the installed artifact is the
+// source tree itself: every file in an opencode plugin dir is loaded, so the
+// fewer files that export a plugin, the better.
+export const PROVIDER_ID = "tanzu"
+export const PROVIDER_NAME = "Tanzu Platform"
+export const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible"
+
+/** Table entries minus the non-chat ones — the offline fallback roster. */
+function tableFallbackModels() {
+  return resolveModels(Object.keys(TABLE).map((id) => ({ id })))
+}
+
+function trimURL(value) {
+  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : ""
+}
+
+/**
+ * opencode's own data dir — `$XDG_DATA_HOME/opencode`, else
+ * `~/.local/share/opencode`. Mirrors Global.Path.data in opencode 1.18.1.
+ */
+function dataDir() {
+  const xdg = process.env.XDG_DATA_HOME
+  return xdg ? path.join(xdg, "opencode") : path.join(os.homedir(), ".local", "share", "opencode")
+}
+
+/**
+ * Where the API key lives. Under opencode's data dir alongside its own
+ * `auth.json` — deliberately NOT under this repo's `foundations/`, which is
+ * user-owned and whose token files belong to the `octnz` launcher.
+ * Resolved on every call so the process env stays authoritative.
+ */
+export function secretPath() {
+  return path.join(dataDir(), "opencode-tanzu", "apikey")
+}
+
+/** @returns {Promise<string>} the absolute path the key was written to */
+async function writeSecret(key) {
+  const file = secretPath()
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  await writeFile(file, key, { mode: 0o600 })
+  // writeFile's mode only applies when it creates the file; an existing file
+  // keeps its old (possibly world-readable) mode.
+  await chmod(file, 0o600)
+  return file
+}
+
+/**
+ * Read the key `authorize` wrote. This is the whole point of dropping the
+ * `{file:…}` indirection: the plugin knows the path, so the plugin does the
+ * reading, and the config never has to name the file.
+ *
+ * Absent or unreadable is NOT an error — a user who has never logged in has no
+ * key file, and one who cleared their data dir has lost it. Both degrade to the
+ * bundled roster with a message (see the config hook), which is exactly what
+ * `{file:…}` could not do, because opencode hard-failed the whole config first.
+ */
+function readKeyFile() {
+  const file = secretPath()
+  try {
+    return readFileSync(file, "utf8").trim()
+  } catch (err) {
+    // ENOENT is the ordinary "not logged in" case and needs no commentary.
+    // Anything else (a permissions problem, a directory in the way) is worth
+    // saying out loud, since the user's key is there and we still cannot use it.
+    if (err?.code !== "ENOENT") {
+      console.error(`[tanzu] could not read the API key at ${file}: ${err.message}`)
+    }
+    return ""
+  }
+}
+
+/**
+ * Credential source. See the Step 1 finding above: the config hook reads what
+ * `authorize` persisted into the opencode config, falling back to env vars.
+ *
+ * A base URL is mandatory — without one there is nothing to register. The key
+ * is optional: absent, the provider still registers off the bundled table and
+ * `loader` supplies the key from the auth store at inference time.
+ *
+ * `options.apiKey` is read as a plain string. If it arrived from a committed
+ * config's `{file:…}`, opencode already resolved it before this hook ran.
+ *
+ * @param {object} cfg the Config object opencode passes to the config hook
+ * @returns {{baseURL: string, apiKey: string} | undefined}
+ */
+function readCredentials(cfg) {
+  const options = cfg?.provider?.[PROVIDER_ID]?.options ?? {}
+  const baseURL = trimURL(options.baseURL) || trimURL(process.env.TANZU_GENAI_BASE_URL)
+  if (!baseURL) return undefined
+  const apiKey =
+    (typeof options.apiKey === "string" ? options.apiKey.trim() : "") ||
+    (process.env.TANZU_GENAI_API_KEY ?? "").trim() ||
+    readKeyFile()
+  return { baseURL, apiKey }
+}
+
+function modelCount(stanza) {
+  return Object.keys(stanza?.models ?? {}).length
+}
+
+/**
+ * opencode deletes a zero-model provider silently, so a models-less `tanzu`
+ * stanza left behind on an early return is the forbidden state: the user gets
+ * no signal at all. `authorize` persists exactly such a stanza (options, no
+ * models — models are the config hook's job), so it can outlive an uninstall.
+ * Strip it and say why.
+ */
+function pruneModellessStanza(cfg, why) {
+  const stanza = cfg?.provider?.[PROVIDER_ID]
+  if (!stanza || modelCount(stanza) > 0) return
+  delete cfg.provider[PROVIDER_ID]
+  console.error(
+    `[tanzu] ${why} Removed the incomplete "tanzu" provider entry ` +
+      `(opencode deletes a zero-model provider without telling you). ` +
+      `Run \`opencode providers login -p tanzu\` to configure it.`,
+  )
+}
+
+/**
+ * Persist provider options into opencode's global config via PATCH
+ * /global/config, reusing the injected client's transport so that a server
+ * started with OPENCODE_SERVER_PASSWORD still authenticates. This is the write
+ * half of the precedent's config -> disk -> config bridge.
+ *
+ * The client's fetch takes a **Request and nothing else** — see the header
+ * comment. Passing (url, init) degrades to a bare GET that 200s and writes
+ * nothing, so the request is built as a Request and the response is checked
+ * against what we sent rather than trusted for its status code.
+ */
+async function persistOptions(input, options) {
+  const clientConfig = input?.client?._client?.getConfig?.() ?? {}
+  const doFetch = clientConfig.fetch ?? fetch
+
+  const headers = new Headers({ "Content-Type": "application/json" })
+  try {
+    if (clientConfig.headers) {
+      for (const [key, value] of new Headers(clientConfig.headers).entries()) headers.set(key, value)
+    }
+  } catch {
+    // Non-Headers-shaped config; the default Content-Type alone is fine.
+  }
+
+  const base = input?.serverUrl ?? clientConfig.baseUrl
+  if (!base) throw new Error("no opencode server URL available to save configuration")
+
+  const request = new Request(new URL("/global/config", base), {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ provider: { [PROVIDER_ID]: { options } } }),
+  })
+  const res = await doFetch(request)
+  if (!res?.ok) throw new Error(`opencode rejected the config update (HTTP ${res?.status})`)
+
+  // PATCH /global/config answers with the merged config. Read the write back
+  // out of it: a 200 alone would also be produced by the GET this used to send.
+  let echoed
+  try {
+    echoed = await res.json()
+  } catch {
+    throw new Error("opencode returned a non-JSON response to the config update")
+  }
+  const saved = echoed?.provider?.[PROVIDER_ID]?.options ?? {}
+  for (const [key, value] of Object.entries(options)) {
+    if (saved[key] !== value) {
+      throw new Error(`opencode did not persist the Tanzu configuration (${key} is missing from the saved config)`)
+    }
+  }
+}
+
+async function log(input, level, message) {
+  try {
+    await input?.client?.app?.log({ body: { service: "opencode-tanzu", level, message } })
+  } catch {
+    // Logging must never break a hook.
+  }
+}
+
+export const TanzuPlugin = async (input) => {
+  return {
+    config: async (cfg) => {
+      const creds = readCredentials(cfg)
+      if (!creds) {
+        // Not configured — contribute nothing, but never leave a models-less
+        // stanza behind for opencode to delete in silence.
+        pruneModellessStanza(cfg, "No Tanzu proxy URL is configured.")
+        return
+      }
+
+      let models
+      if (!creds.apiKey) {
+        // The key is in the auth store only (or nowhere). Discovery cannot
+        // authenticate, but `loader` can still supply the key for inference, so
+        // register the bundled roster rather than nothing.
+        console.error(
+          `[tanzu] no API key in the config or environment; using the bundled model list. ` +
+            `The key from \`opencode providers login -p tanzu\` will still be used for inference.`,
+        )
+        models = tableFallbackModels()
+      } else {
+        try {
+          models = resolveModels(await discoverModels(creds.baseURL, creds.apiKey))
+        } catch (err) {
+          // Never fail to an empty picker: a zero-model provider is deleted
+          // silently and the user gets no signal at all. Degrade to the table.
+          const hint = err instanceof DiscoveryError && err.hint ? ` ${err.hint}` : ""
+          console.error(`[tanzu] model discovery failed: ${err.message}.${hint} Falling back to bundled models.`)
+          models = tableFallbackModels()
+        }
+      }
+
+      if (Object.keys(models).length === 0) {
+        pruneModellessStanza(cfg, "No usable chat models were found.")
+        return
+      }
+
+      const existing = cfg.provider?.[PROVIDER_ID] ?? {}
+      // The key goes into the IN-MEMORY config only, because that is what
+      // @ai-sdk/openai-compatible reads at inference. Config-hook mutations are
+      // never written back to disk: opencode's Config.updateGlobal re-parses the
+      // config FILE's raw text before merging and rewriting, and never
+      // serializes the in-memory Config. So the key we inject here cannot leak
+      // into opencode.json, even if some later code path calls updateGlobal.
+      const options = { ...existing.options, baseURL: creds.baseURL }
+      // Drop the key entirely when we have none, rather than leaving `""` from
+      // `existing.options` to shadow what `loader` is about to supply from the
+      // auth store.
+      if (creds.apiKey) options.apiKey = creds.apiKey
+      else delete options.apiKey
+
+      cfg.provider = cfg.provider ?? {}
+      cfg.provider[PROVIDER_ID] = {
+        ...existing,
+        name: existing.name ?? PROVIDER_NAME,
+        npm: existing.npm ?? OPENAI_COMPATIBLE_NPM,
+        models,
+        options,
+      }
+    },
+
+    auth: {
+      provider: PROVIDER_ID,
+
+      /**
+       * Runs at provider.ts:1542, after the config hook has created the entry.
+       * Returns options only — models are already settled by then.
+       *
+       * This is the no-secret-on-disk path and it is reachable: the config hook
+       * registers on a base URL alone (bundled roster), and this fills the key
+       * in for inference. A user who wants nothing in a config file can set
+       * TANZU_GENAI_BASE_URL (or hand-write just `options.baseURL`), delete the
+       * key file, and log in — the key then lives only in opencode's auth store.
+       */
+      loader: async (auth) => {
+        try {
+          const stored = await auth()
+          if (!stored || stored.type !== "api" || !stored.key) return {}
+          return { apiKey: stored.key }
+        } catch {
+          return {}
+        }
+      },
+
+      methods: [
+        {
+          type: "api",
+          label: "Foundation URL + API key",
+          prompts: [
+            {
+              type: "text",
+              key: "baseURL",
+              message: "Tanzu GenAI proxy URL (must end in /openai/v1)",
+              placeholder: "https://genai-proxy.sys.<foundation>/<instance>/openai/v1",
+              validate: (value) => {
+                // Trim exactly as `trimURL`/`authorize` do, or the prompt and
+                // the config hook disagree about what is acceptable.
+                const trimmed = trimURL(value)
+                if (!trimmed) return "A proxy URL is required"
+                let u
+                try {
+                  u = new URL(trimmed)
+                } catch {
+                  return "Not a valid URL"
+                }
+                if (u.protocol !== "https:") return "URL must use https"
+                if (!trimmed.endsWith("/openai/v1")) return "URL must end in /openai/v1"
+                return undefined
+              },
+            },
+            {
+              type: "text",
+              key: "apiKey",
+              // opencode's own `pluginAuth` ALWAYS appends a built-in "Enter your
+              // API key" prompt for `type: "api"` methods, and it does NOT pass
+              // that value to `authorize` — only these `prompts` reach us. We need
+              // the key here to validate it, write the key file, and enable live
+              // discovery, so the user is asked twice and the second answer is
+              // discarded (`authorize` returns the key, and opencode takes
+              // `X.key ?? h`). Verified on 1.18.1. Say so rather than surprise them.
+              message: "API key (from `cf service-key`) — opencode will ask you to repeat this next",
+              // `authorize` trims, so whitespace-only must be rejected here
+              // rather than accepted and then reported as a missing key.
+              validate: (value) => (typeof value === "string" && value.trim() ? undefined : "An API key is required"),
+            },
+          ],
+
+          /**
+           * The credential bridge, and the split that makes it safe. The config
+           * hook cannot read the auth store, so what it needs must go somewhere
+           * it can reach — but the two halves go to different places:
+           *
+           *   - the URL, a non-secret, is persisted into the opencode config,
+           *     where the next config-hook run reads it off `cfg`;
+           *   - the key goes to a 0600 file which the config hook reads ITSELF.
+           *     The config never names it. See the header comment for why the
+           *     `{file:…}` pointer this used to persist had to go.
+           *
+           * The key is ALSO returned so it lands in the auth store, which keeps
+           * `loader` working for inference even if the key file is lost.
+           */
+          authorize: async (inputs = {}) => {
+            const baseURL = trimURL(inputs.baseURL)
+            const apiKey = (inputs.apiKey ?? "").trim()
+            if (!baseURL || !apiKey) {
+              await log(input, "error", "Login failed: a proxy URL and an API key are both required.")
+              return { type: "failed" }
+            }
+
+            // Fail the login rather than persist credentials we know are bad.
+            try {
+              await discoverModels(baseURL, apiKey)
+            } catch (err) {
+              const hint = err instanceof DiscoveryError && err.hint ? ` ${err.hint}` : ""
+              await log(input, "error", `Login failed: ${err.message}.${hint}`)
+              return { type: "failed" }
+            }
+
+            try {
+              await writeSecret(apiKey)
+            } catch (err) {
+              await log(input, "error", `Could not save the Tanzu API key: ${err.message}`)
+              return { type: "failed" }
+            }
+
+            try {
+              // ONLY non-secret settings. The key stays in the file `writeSecret`
+              // just wrote, which the config hook reads itself; the config must
+              // not name it, not even via `{file:…}` (see the header comment —
+              // that bricks opencode for every provider).
+              await persistOptions(input, { baseURL })
+            } catch (err) {
+              await log(input, "error", `Could not save the Tanzu configuration: ${err.message}`)
+              return { type: "failed" }
+            }
+
+            return { type: "success", key: apiKey, provider: PROVIDER_ID }
+          },
+        },
+      ],
+    },
+  }
+}
+
+export default { id: "opencode-tanzu", server: TanzuPlugin }

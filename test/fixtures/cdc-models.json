@@ -1,0 +1,9 @@
+{
+  "object": "list",
+  "data": [
+    { "id": "nomic-ai/nomic-embed-text-v2-moe", "object": "model", "created": 1784128574799 },
+    { "id": "cyankiwi/Qwen3.6-27B-AWQ-INT4", "object": "model", "created": 1784128574799 },
+    { "id": "google/gemma-4-31B-it-qat-w4a16-ct", "object": "model", "created": 1784128574799 },
+    { "id": "deepreinforce-ai/Ornith-1.0-35B", "object": "model", "created": 1784128574799 }
+  ]
+}
