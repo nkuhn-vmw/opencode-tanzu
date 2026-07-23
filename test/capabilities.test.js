@@ -27,6 +27,17 @@ test("known models carry sourced context and tool_call", () => {
   assert.equal(out[QWEN].tool_call, true)
 })
 
+// REGRESSION: Laguna is served at 131072 but the tile strips max_model_len
+// from /v1/models, so before this table row existed it resolved to the 8192
+// unknown-id default and opencode compacted the session in a loop.
+test("Laguna carries its served 131072 context, not the unknown-id default", () => {
+  const LAGUNA = "poolside/Laguna-S-2.1-INT4"
+  const out = resolveModels([{ id: LAGUNA }])
+  assert.equal(out[LAGUNA].limit.context, 131072)
+  assert.equal(out[LAGUNA].tool_call, true)
+  assert.ok(!/unverified/i.test(out[LAGUNA].name))
+})
+
 test("unknown chat model is included with conservative defaults and marked unverified", () => {
   const out = resolveModels([{ id: "acme/mystery-7b" }])
   assert.equal(out["acme/mystery-7b"].limit.context, CONSERVATIVE_CONTEXT)

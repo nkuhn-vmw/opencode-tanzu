@@ -5,6 +5,12 @@ import os from "node:os"
 import path from "node:path"
 
 import { TanzuPlugin, PROVIDER_ID, PROVIDER_NAME, secretPath } from "../src/opencode-tanzu.js"
+import { TABLE } from "../src/opencode-tanzu-capabilities.js"
+
+// The bundled-fallback roster is every chat entry in the table — derived, not
+// hardcoded, so adding a model (Laguna, 2026-07-22) cannot silently break the
+// degradation tests.
+const FALLBACK_COUNT = Object.values(TABLE).filter((e) => e.kind === "chat").length
 
 const BASE = "https://genai-proxy.example.test/inst/openai/v1"
 const SERVER = new URL("http://127.0.0.1:4096")
@@ -404,7 +410,7 @@ test("a baseURL with no key registers the bundled roster so the loader can fire"
       }, () => h.config(cfg))
 
       assert.equal(discovered, false, "discovery cannot authenticate without a key; it must not be attempted")
-      assert.equal(Object.keys(cfg.provider.tanzu.models).length, 3)
+      assert.equal(Object.keys(cfg.provider.tanzu.models).length, FALLBACK_COUNT)
       assert.equal("apiKey" in cfg.provider.tanzu.options, false, "an empty key must not shadow the loader's")
       assert.equal(cfg.provider.tanzu.name, PROVIDER_NAME)
     }),
@@ -436,7 +442,7 @@ test("a missing key file degrades gracefully — bundled roster, no throw", asyn
         () => h.config(cfg),
       )
       assert.equal("apiKey" in cfg.provider.tanzu.options, false, "an empty key must not shadow the loader's")
-      assert.equal(Object.keys(cfg.provider.tanzu.models).length, 3, "never zero models")
+      assert.equal(Object.keys(cfg.provider.tanzu.models).length, FALLBACK_COUNT, "never zero models")
       assert.equal(cfg.provider.tanzu.name, PROVIDER_NAME, "the provider is still registered")
     }),
   )
@@ -453,7 +459,7 @@ test("an unreadable key file degrades the same way rather than throwing", async 
         async () => assert.fail("must not call the foundation without a key"),
         () => h.config(cfg),
       )
-      assert.equal(Object.keys(cfg.provider.tanzu.models).length, 3)
+      assert.equal(Object.keys(cfg.provider.tanzu.models).length, FALLBACK_COUNT)
     }),
   )
 })
@@ -494,7 +500,7 @@ test("discovery failure degrades to the bundled table, never to zero models", as
   const cfg = { provider: { tanzu: { options: { baseURL: BASE, apiKey: "k" } } } }
   const h = await hooks()
   await withFetch(async () => jsonResponse({}, 500), () => h.config(cfg))
-  assert.equal(Object.keys(cfg.provider.tanzu.models).length, 3)
+  assert.equal(Object.keys(cfg.provider.tanzu.models).length, FALLBACK_COUNT)
 })
 
 test("an empty roster strips the provider rather than registering zero models", async () => {

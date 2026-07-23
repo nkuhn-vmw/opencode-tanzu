@@ -50,6 +50,19 @@ export const TABLE = {
     output: 32768,
     modalities: { input: ["text"], output: ["text"] },
   },
+  // Served on CDC with max_model_len 131072 (verified on the worker's vLLM
+  // config 2026-07-22 — the tile's /v1/models strips the field, which is
+  // exactly why this row exists: without it the model fell to the 8192
+  // unknown-id default and opencode compacted the session nonstop). Tool
+  // calling verified in agentic use through the tile. Text-only.
+  "poolside/Laguna-S-2.1-INT4": {
+    kind: "chat",
+    name: "Laguna-S-2.1 (Tanzu)",
+    tool_call: true,
+    context: 131072,
+    output: 32768,
+    modalities: { input: ["text"], output: ["text"] },
+  },
   // Listed explicitly so exclusion is deterministic rather than dependent on the
   // NON_CHAT_ID regex. config.json says n_positions 2048, but the card and
   // sentence_bert_config.json both say 512 — max_position_embeddings overstates 4x.

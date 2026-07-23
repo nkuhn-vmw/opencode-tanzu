@@ -1,12 +1,17 @@
 {
   "name": "opencode-tanzu",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "opencode provider plugin for Tanzu Platform GenAI (community project, not supported by Broadcom)",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/opencode-tanzu.js",
-  "exports": { ".": "./src/opencode-tanzu.js" },
-  "files": ["src", "LICENSE"],
+  "exports": {
+    ".": "./src/opencode-tanzu.js"
+  },
+  "files": [
+    "src",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test"
   },
@@ -15,7 +20,17 @@
     "url": "git+https://github.com/nkuhn-vmw/opencode-tanzu.git"
   },
   "homepage": "https://github.com/nkuhn-vmw/opencode-tanzu#readme",
-  "bugs": { "url": "https://github.com/nkuhn-vmw/opencode-tanzu/issues" },
-  "keywords": ["opencode", "opencode-plugin", "tanzu", "genai", "cloud-foundry"],
-  "engines": { "node": ">=20" }
+  "bugs": {
+    "url": "https://github.com/nkuhn-vmw/opencode-tanzu/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tanzu",
+    "genai",
+    "cloud-foundry"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
 }
