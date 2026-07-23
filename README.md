@@ -23,14 +23,25 @@ artifact — there is nothing to build and no package manager in the install pat
 
 ## Install
 
+Via Homebrew:
+
+```bash
+brew install nkuhn-vmw/tap/opencode-tanzu
+opencode-tanzu-install
+```
+
+Or from a clone:
+
 ```bash
 git clone https://github.com/nkuhn-vmw/opencode-tanzu.git
 cd opencode-tanzu && ./install.sh
 ```
 
-That copies the three `src/*.js` files into opencode's global plugin directory
+Both do the same thing: copy the three `src/*.js` files into opencode's global plugin directory
 (`${XDG_CONFIG_HOME:-~/.config}/opencode/plugins/`), where opencode auto-loads them at startup.
-Update with `git pull && ./install.sh`; remove with `./install.sh --uninstall`.
+Update with `brew upgrade opencode-tanzu && opencode-tanzu-install` (or `git pull &&
+./install.sh`); remove with `opencode-tanzu-install --uninstall` (or `./install.sh
+--uninstall`).
 
 Prefer per-project? `./install.sh --project` installs into `./.opencode/plugins/` of the current
 directory instead.
