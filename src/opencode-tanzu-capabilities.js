@@ -50,16 +50,31 @@ export const TABLE = {
     output: 32768,
     modalities: { input: ["text"], output: ["text"] },
   },
-  // Served on CDC with max_model_len 131072 (verified on the worker's vLLM
-  // config 2026-07-22 — the tile's /v1/models strips the field, which is
-  // exactly why this row exists: without it the model fell to the 8192
-  // unknown-id default and opencode compacted the session nonstop). Tool
-  // calling verified in agentic use through the tile. Text-only.
+  // The INT4 (Ampere / 4×3090, W4A16) variant — formerly served on CDC at
+  // max_model_len 131072 (verified on the worker's vLLM config 2026-07-22).
+  // Superseded on CDC 2026-07-24 by the -NVFP4 row below; kept for foundations
+  // still serving the INT4 build. The tile's /v1/models strips max_model_len,
+  // which is exactly why this row exists: without it the id falls to the 8192
+  // unknown-id default and opencode compacts the session nonstop. Tool calling
+  // verified in agentic use through the tile. Text-only.
   "poolside/Laguna-S-2.1-INT4": {
     kind: "chat",
     name: "Laguna-S-2.1 (Tanzu)",
     tool_call: true,
     context: 131072,
+    output: 32768,
+    modalities: { input: ["text"], output: ["text"] },
+  },
+  // The Blackwell (RTX PRO 6000 / SM120) NVFP4 build — supersedes the INT4 row
+  // on CDC as of 2026-07-24. Served at max_model_len 262144 (verified on the
+  // worker's vLLM 0.25.1 config; the tile still strips the field, so this row is
+  // required or the id falls to the 8192 unknown-id default → nonstop compaction
+  // / looping). Tool calling verified. Text-only.
+  "poolside/Laguna-S-2.1-NVFP4": {
+    kind: "chat",
+    name: "Laguna-S-2.1 (Tanzu)",
+    tool_call: true,
+    context: 262144,
     output: 32768,
     modalities: { input: ["text"], output: ["text"] },
   },
