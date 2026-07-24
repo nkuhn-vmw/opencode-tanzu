@@ -38,6 +38,17 @@ test("Laguna carries its served 131072 context, not the unknown-id default", () 
   assert.ok(!/unverified/i.test(out[LAGUNA].name))
 })
 
+// REGRESSION: the CDC swap INT4 -> NVFP4 (Blackwell, 2026-07-24) changed the
+// served model id. The new id must carry its 262144 context, or it falls to the
+// 8192 unknown-id default and opencode loops/compacts nonstop.
+test("Laguna-NVFP4 carries its served 262144 context, not the unknown-id default", () => {
+  const LAGUNA = "poolside/Laguna-S-2.1-NVFP4"
+  const out = resolveModels([{ id: LAGUNA }])
+  assert.equal(out[LAGUNA].limit.context, 262144)
+  assert.equal(out[LAGUNA].tool_call, true)
+  assert.ok(!/unverified/i.test(out[LAGUNA].name))
+})
+
 test("unknown chat model is included with conservative defaults and marked unverified", () => {
   const out = resolveModels([{ id: "acme/mystery-7b" }])
   assert.equal(out["acme/mystery-7b"].limit.context, CONSERVATIVE_CONTEXT)
