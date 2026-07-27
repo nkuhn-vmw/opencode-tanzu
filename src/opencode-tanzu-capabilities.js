@@ -141,3 +141,25 @@ export function resolveModels(cards) {
   }
   return out
 }
+
+/**
+ * The ids worth probing: chat models we have no bundled row for. Mirrors the
+ * exclusions `resolveModels` applies, so a probe is never spent on a model that
+ * would be filtered out of the picker anyway.
+ *
+ * @param {{id: string}[]} cards
+ * @returns {string[]} unique unknown chat ids, in roster order
+ */
+export function unknownChatIds(cards) {
+  const out = []
+  const seen = new Set()
+  for (const card of cards ?? []) {
+    const id = card?.id
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    if (TABLE[id]) continue
+    if (NON_CHAT_ID.test(id)) continue
+    out.push(id)
+  }
+  return out
+}

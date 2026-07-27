@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { resolveModels, CONSERVATIVE_CONTEXT } from "../src/opencode-tanzu-capabilities.js"
+import { resolveModels, CONSERVATIVE_CONTEXT, unknownChatIds } from "../src/opencode-tanzu-capabilities.js"
 
 const QWEN = "cyankiwi/Qwen3.6-27B-AWQ-INT4"
 const GEMMA = "google/gemma-4-31B-it-qat-w4a16-ct"
@@ -75,4 +75,25 @@ test("output is clamped to half the context, not merely <= context", () => {
   const out = resolveModels([{ id: QWEN, max_model_len: 4096 }])
   assert.deepEqual(out[QWEN].limit, { context: 4096, output: 2048 })
   assert.equal(out[QWEN].limit.output, Math.floor(out[QWEN].limit.context / 2), "clampOutput must halve, not just cap")
+})
+
+test("unknownChatIds returns only ids with no table row", () => {
+  const ids = unknownChatIds([{ id: QWEN }, { id: "acme/mystery-7b" }])
+  assert.deepEqual(ids, ["acme/mystery-7b"])
+})
+
+// Probing an embedding model would waste a request and can never yield a chat
+// context — the filter must match resolveModels' own exclusion rules.
+test("unknownChatIds never includes embedding or rerank ids", () => {
+  const ids = unknownChatIds([{ id: NOMIC }, { id: "acme/text-embedding-3" }, { id: "acme/bge-reranker-v2" }])
+  assert.deepEqual(ids, [])
+})
+
+test("unknownChatIds skips malformed cards and dedupes", () => {
+  const ids = unknownChatIds([{ id: "a/b" }, { id: "a/b" }, {}, null])
+  assert.deepEqual(ids, ["a/b"])
+})
+
+test("unknownChatIds on an empty roster is empty", () => {
+  assert.deepEqual(unknownChatIds([]), [])
 })
