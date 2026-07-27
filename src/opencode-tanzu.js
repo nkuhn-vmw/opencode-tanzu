@@ -97,12 +97,11 @@
 
 import { readFileSync } from "node:fs"
 import { chmod, mkdir, writeFile } from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 
 import { resolveModels, TABLE, unknownChatIds } from "./opencode-tanzu-capabilities.js"
 import { CLAMPED, discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "./opencode-tanzu-discovery.js"
-import { getEntry, readCache, setEntry, writeCache } from "./opencode-tanzu-cache.js"
+import { dataDir, getEntry, readCache, setEntry, writeCache } from "./opencode-tanzu-cache.js"
 
 // Former src/index.js entry point, folded in so the installed artifact is the
 // source tree itself: every file in an opencode plugin dir is loaded, so the
@@ -116,17 +115,54 @@ function tableFallbackModels() {
   return resolveModels(Object.keys(TABLE).map((id) => ({ id })))
 }
 
-function trimURL(value) {
-  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : ""
-}
+/**
+ * How many unknown ids get probed concurrently. Each probed id fires two
+ * concurrent POSTs (context + tool_call), so this bounds the in-flight
+ * request count to `PROBE_CONCURRENCY_LIMIT * 2` rather than letting a large
+ * roster fire everything in the same tick.
+ */
+export const PROBE_CONCURRENCY_LIMIT = 6
 
 /**
- * opencode's own data dir — `$XDG_DATA_HOME/opencode`, else
- * `~/.local/share/opencode`. Mirrors Global.Path.data in opencode 1.18.1.
+ * Hard cap on how many unknown ids are probed in a single startup. A gateway
+ * listing 200+ models (or a hostile `/v1/models`) must not turn one cold
+ * start into hundreds of simultaneous generation requests against the
+ * foundation's scheduler and the laptop's socket table. Ids beyond the cap
+ * are simply not probed this run and fall back to the conservative default —
+ * exactly as every unknown id behaved before probing existed — and get
+ * picked up on a later start (LRU-free: it is always the same prefix of the
+ * roster order until the earlier ones are cached).
  */
-function dataDir() {
-  const xdg = process.env.XDG_DATA_HOME
-  return xdg ? path.join(xdg, "opencode") : path.join(os.homedir(), ".local", "share", "opencode")
+export const PROBE_ID_CAP = 25
+
+/**
+ * Run `fn` over `items` with at most `limit` calls in flight at once. A
+ * worker-pool, not a batch/chunk split — each worker immediately picks up the
+ * next item as soon as its current one settles, so a slow id never blocks
+ * workers assigned to items after it from starting.
+ *
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T) => Promise<R>} fn
+ * @returns {Promise<R[]>} results in the same order as `items`
+ */
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length)
+  let next = 0
+  async function worker() {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
+
+function trimURL(value) {
+  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : ""
 }
 
 /**
@@ -331,6 +367,12 @@ function toolCallOutcome(raw) {
  * resolves twice, or a shared test fixture, must not see one call's probe
  * results bleed into another's.
  *
+ * Probing is bounded two ways (an unbounded `Promise.all` fan-out here would
+ * let a 200+-model roster fire hundreds of simultaneous generation requests
+ * at cold start): at most `PROBE_CONCURRENCY_LIMIT` ids in flight at once,
+ * and at most `PROBE_ID_CAP` ids probed per run. Ids beyond the cap fall back
+ * to the conservative default, exactly like any other unknown id.
+ *
  * @returns {Promise<{cards: {id: string, max_model_len?: number|null}[], toolCalls: Map<string, boolean>}>}
  *   the enriched cards and the probed tool_call verdicts by id
  */
@@ -339,28 +381,37 @@ async function enrichUnknownCards(cards, baseURL, apiKey) {
   const toolCalls = new Map()
   if (unknown.length === 0) return { cards, toolCalls }
 
+  let idsToProbe = unknown
+  if (unknown.length > PROBE_ID_CAP) {
+    idsToProbe = unknown.slice(0, PROBE_ID_CAP)
+    const skipped = unknown.length - PROBE_ID_CAP
+    console.error(
+      `[tanzu] roster has ${unknown.length} unknown models; probing only the first ${PROBE_ID_CAP} this run and ` +
+        `skipping ${skipped} to bound startup request fan-out. Skipped ids keep the conservative default until a ` +
+        `later start probes them.`,
+    )
+  }
+
   const cache = readCache()
   let dirty = false
 
-  const results = await Promise.all(
-    unknown.map(async (id) => {
-      const cached = getEntry(cache, baseURL, id)
-      if (cached) return { id, context: cached.context, toolCall: cached.toolCall }
-      const [rawContext, rawToolCall] = await Promise.all([
-        probeContextLength(baseURL, apiKey, id),
-        probeToolCall(baseURL, apiKey, id),
-      ])
-      const context = contextOutcome(rawContext)
-      const toolCall = toolCallOutcome(rawToolCall)
-      setEntry(cache, baseURL, id, {
-        context: context.value,
-        toolCall: toolCall.value,
-        conclusive: context.conclusive && toolCall.conclusive,
-      })
-      dirty = true
-      return { id, context: context.value, toolCall: toolCall.value }
-    }),
-  )
+  const results = await mapWithConcurrency(idsToProbe, PROBE_CONCURRENCY_LIMIT, async (id) => {
+    const cached = getEntry(cache, baseURL, id)
+    if (cached) return { id, context: cached.context, toolCall: cached.toolCall }
+    const [rawContext, rawToolCall] = await Promise.all([
+      probeContextLength(baseURL, apiKey, id),
+      probeToolCall(baseURL, apiKey, id),
+    ])
+    const context = contextOutcome(rawContext)
+    const toolCall = toolCallOutcome(rawToolCall)
+    setEntry(cache, baseURL, id, {
+      context: context.value,
+      toolCall: toolCall.value,
+      conclusive: context.conclusive && toolCall.conclusive,
+    })
+    dirty = true
+    return { id, context: context.value, toolCall: toolCall.value }
+  })
 
   const byId = new Map(results.map((r) => [r.id, r]))
   const enrichedCards = cards.map((card) => {

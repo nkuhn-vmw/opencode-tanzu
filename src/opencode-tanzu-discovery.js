@@ -3,6 +3,8 @@
  * proxy. I/O only — this module knows nothing about capabilities or catalogs.
  */
 
+import { MAX_PLAUSIBLE_CONTEXT, MIN_PLAUSIBLE_CONTEXT } from "./opencode-tanzu-capabilities.js"
+
 export class DiscoveryError extends Error {
   /** @param {string} message @param {{status?: number, hint?: string, cause?: unknown}} [opts] */
   constructor(message, opts = {}) {
@@ -138,7 +140,13 @@ export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
   const match = message.match(/max_model_len=(?:max_total_tokens=)?(\d+)/)
   if (!match) return null
   const context = Number.parseInt(match[1], 10)
-  return Number.isFinite(context) && context > 0 ? context : null
+  // A mangled or hostile error body (or a value that survived a truncated
+  // parse) could report an implausible number — either far too small to be a
+  // real chat context (looping compaction) or absurdly large (compaction
+  // never fires and every request is rejected at the tile). Treat anything
+  // outside the plausible band as inconclusive rather than trusting it.
+  if (!Number.isFinite(context) || context < MIN_PLAUSIBLE_CONTEXT || context > MAX_PLAUSIBLE_CONTEXT) return null
+  return context
 }
 
 /**

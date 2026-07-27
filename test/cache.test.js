@@ -43,6 +43,18 @@ test("a corrupt cache file reads as empty rather than throwing", async () => {
   })
 })
 
+// M2 — `typeof [] === "object"`, so a naive object-check would accept an
+// array on disk; `setEntry` would then attach string-keyed properties to it
+// that `JSON.stringify` silently drops on the next write, disabling caching
+// forever with no error anywhere.
+test("an array on disk reads as empty rather than being accepted as the cache", async () => {
+  await withDataHome(() => {
+    mkdirSync(path.dirname(cachePath()), { recursive: true })
+    writeFileSync(cachePath(), "[]")
+    assert.deepEqual(readCache(), {})
+  })
+})
+
 test("an entry round-trips through write and read", async () => {
   await withDataHome(async () => {
     const cache = {}
@@ -124,6 +136,23 @@ test("an entry with no conclusive field defaults to the long TTL", () => {
   const key = Object.keys(cache)[0]
   cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
   assert.notEqual(getEntry(cache, BASE, "a/b"), undefined, "no conclusive field must default to conclusive:true")
+})
+
+// I4 — clock skew (NTP correction, a resumed suspended VM, a dual-boot clock)
+// can put `probedAt` in the future. The pre-fix check (`Date.now() -
+// probedAt > ttlMs`) goes negative in that case and never exceeds the TTL, so
+// the entry — including a bad negative one — reads as fresh forever. Both
+// ends of the age must be bounded.
+test("an entry with a probedAt in the future (clock skew) is treated as expired, not immortal", () => {
+  const cache = {}
+  setEntry(cache, BASE, "a/b", { context: 1000 })
+  const key = Object.keys(cache)[0]
+  cache[key].probedAt = Date.now() + 60 * 60 * 1000 // one hour in the future
+  assert.equal(
+    getEntry(cache, BASE, "a/b"),
+    undefined,
+    "a future probedAt must not be treated as infinitely fresh",
+  )
 })
 
 test("entries are scoped per foundation, not shared across base URLs", () => {

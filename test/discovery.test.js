@@ -2,6 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { CLAMPED, discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "../src/opencode-tanzu-discovery.js"
+import { MIN_PLAUSIBLE_CONTEXT, MAX_PLAUSIBLE_CONTEXT } from "../src/opencode-tanzu-capabilities.js"
 
 const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/cdc-models.json", import.meta.url)))
 const BASE = "https://genai-proxy.example.test/inst/openai/v1"
@@ -123,6 +124,27 @@ test("probe returns null when the error body has no parseable limit", async () =
 test("probe returns null for a non-positive parsed limit", async () => {
   const body = { error: { message: "max_model_len=0" } }
   assert.equal(await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(400, body) }), null)
+})
+
+// I1 — a mangled or hostile error body could report an implausible number:
+// far too small to be a real chat context (instant compaction looping) or
+// absurdly large (compaction never fires, every request rejected at the
+// tile). Both are inconclusive, not facts about the model.
+test("probe returns null for an implausibly large parsed limit", async () => {
+  const body = { error: { message: `max_model_len=${MAX_PLAUSIBLE_CONTEXT + 1}` } }
+  assert.equal(await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(400, body) }), null)
+})
+
+test("probe returns null for an implausibly small parsed limit", async () => {
+  const body = { error: { message: `max_model_len=${MIN_PLAUSIBLE_CONTEXT - 1}` } }
+  assert.equal(await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(400, body) }), null)
+})
+
+test("probe accepts a parsed limit exactly at the plausible band's edges", async () => {
+  const min = { error: { message: `max_model_len=${MIN_PLAUSIBLE_CONTEXT}` } }
+  assert.equal(await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(400, min) }), MIN_PLAUSIBLE_CONTEXT)
+  const max = { error: { message: `max_model_len=${MAX_PLAUSIBLE_CONTEXT}` } }
+  assert.equal(await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(400, max) }), MAX_PLAUSIBLE_CONTEXT)
 })
 
 test("probe posts the over-limit request with the bearer token", async () => {

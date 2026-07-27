@@ -4,8 +4,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSyn
 import os from "node:os"
 import path from "node:path"
 
-import { TanzuPlugin, PROVIDER_ID, PROVIDER_NAME, secretPath } from "../src/opencode-tanzu.js"
-import { TABLE } from "../src/opencode-tanzu-capabilities.js"
+import { TanzuPlugin, PROVIDER_ID, PROVIDER_NAME, secretPath, PROBE_ID_CAP } from "../src/opencode-tanzu.js"
+import { TABLE, CONSERVATIVE_CONTEXT } from "../src/opencode-tanzu-capabilities.js"
 import { cachePath } from "../src/opencode-tanzu-cache.js"
 
 // The bundled-fallback roster is every chat entry in the table — derived, not
@@ -570,10 +570,11 @@ const OVER_LIMIT_400 = {
 /**
  * A roster with one id the bundled table has never heard of. A factory, not a
  * shared constant: unlike a real `fetch(...).json()` (which parses a fresh
- * object from the wire every call), this file's `jsonResponse` hands back the
- * literal body object with no cloning — so a single shared object would let
- * `enrichUnknownCards`'s in-place `card.max_model_len = ...` mutation from one
- * test bleed into the next.
+ * object from the wire every call), this file's `jsonResponse` test helper
+ * hands back the literal body object with no cloning — so a single shared
+ * object literal would still be aliased across every test that called it,
+ * and one test's later mutation of its own `cfg`/roster references could
+ * bleed into another's.
  */
 function rosterWithUnknown() {
   return { data: [{ id: "cyankiwi/Qwen3.6-27B-AWQ-INT4" }, { id: "acme/brand-new-9b" }] }
@@ -810,6 +811,53 @@ test("a probed tool_call:false overrides the optimistic default", async () => {
         return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "no tools here" } }] })
       }, () => h.config(cfg))
       assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].tool_call, false)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// I2 — unbounded probe fan-out. A roster with more unknown ids than
+// PROBE_ID_CAP must probe only the first PROBE_ID_CAP of them and skip the
+// rest (falling back to the conservative default), logging one clear line
+// about the skip rather than silently firing hundreds of concurrent
+// generation requests at a cold start.
+// ---------------------------------------------------------------------------
+
+test("a roster with more unknown ids than the cap probes only the cap and skips the rest with a logged message", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+
+      const totalUnknown = PROBE_ID_CAP + 10
+      const unknownCards = Array.from({ length: totalUnknown }, (_, i) => ({ id: `acme/model-${i}` }))
+
+      const probedIds = new Set()
+      const errors = []
+      const realError = console.error
+      console.error = (msg) => errors.push(String(msg))
+      try {
+        await withFetch(async (url, init) => {
+          if (String(url).endsWith("/models")) return jsonResponse({ data: unknownCards })
+          const body = JSON.parse(init.body)
+          probedIds.add(body.model)
+          if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+          return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+        }, () => h.config(cfg))
+      } finally {
+        console.error = realError
+      }
+
+      assert.equal(probedIds.size, PROBE_ID_CAP, `expected exactly ${PROBE_ID_CAP} distinct ids to be probed`)
+      assert.ok(
+        errors.some((m) => m.includes(`${totalUnknown}`) && m.includes(`${PROBE_ID_CAP}`) && m.includes("10")),
+        `expected a skip message naming the roster size, the cap, and the skipped count; got: ${JSON.stringify(errors)}`,
+      )
+
+      // Probed ids (the first PROBE_ID_CAP, in roster order) get the served context.
+      assert.equal(cfg.provider.tanzu.models["acme/model-0"].limit.context, 262144)
+      // Ids beyond the cap were never probed and fall back to the conservative default.
+      assert.equal(cfg.provider.tanzu.models[`acme/model-${PROBE_ID_CAP}`].limit.context, CONSERVATIVE_CONTEXT)
     }),
   )
 })

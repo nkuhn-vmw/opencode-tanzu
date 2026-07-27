@@ -162,11 +162,15 @@ therefore **bundled** with the plugin, hand-sourced from each model's card and `
 If discovery fails for any reason, the provider **still registers** off the bundled table, with a
 warning on stderr. You never get an empty picker.
 
-**Discovery can take up to 20 seconds.** It is awaited during opencode's `config` hook with a
-20-second timeout. A foundation that actively refuses the connection degrades quickly, but one
-that is unreachable behind a packet-dropping firewall or VPN will make opencode's startup appear
-to hang for the full 20 seconds before falling back to the bundled table. That is a stall, not a
-freeze — it resolves on its own.
+**Startup can stall for up to ~28 seconds, in two separate phases.** Roster discovery is awaited
+during opencode's `config` hook with a 20-second timeout. When that roster contains ids the
+bundled table has never seen, the plugin then probes each one for its real context window and
+tool-call support, and that probe phase has its own 8-second-per-request timeout — launched in the
+same tick, so it adds up to 8 more seconds on top of the first stall, not 8 seconds per model. A
+foundation that actively refuses the connection degrades quickly, but one that answers `/v1/models`
+and then silently blackholes `/chat/completions` (a packet-dropping firewall or VPN) will make
+opencode's startup appear to hang for the full ~28 seconds before falling back to the bundled
+table. That is a stall, not a freeze — it resolves on its own.
 
 ### Caveat: a hand-pinned roster will be replaced
 

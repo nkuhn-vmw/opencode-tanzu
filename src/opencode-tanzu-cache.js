@@ -7,7 +7,9 @@
  * opencode from starting.
  */
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
 import os from "node:os"
 import path from "node:path"
 
@@ -27,7 +29,16 @@ export const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000
  */
 export const INCONCLUSIVE_TTL_MS = 30 * 60 * 1000
 
-function dataDir() {
+/**
+ * opencode's own data dir — `$XDG_DATA_HOME/opencode`, else
+ * `~/.local/share/opencode`. Mirrors Global.Path.data in opencode 1.18.1.
+ *
+ * The single source of truth: the api-key file (opencode-tanzu.js) and the
+ * cache file (this module) MUST land in the same directory, so this is
+ * exported here — the lower-level, dependency-free module — and imported by
+ * opencode-tanzu.js rather than redefined there.
+ */
+export function dataDir() {
   const xdg = process.env.XDG_DATA_HOME
   return xdg ? path.join(xdg, "opencode") : path.join(os.homedir(), ".local", "share", "opencode")
 }
@@ -45,11 +56,18 @@ function keyFor(baseURL, id) {
   return `${baseURL}\n${id}`
 }
 
-/** @returns {object} the cache, or {} when missing/corrupt/unreadable */
+/**
+ * @returns {object} the cache, or {} when missing/corrupt/unreadable
+ *
+ * `typeof [] === "object"`, so an array on disk must be rejected explicitly —
+ * otherwise `setEntry` attaches string-keyed properties to it that
+ * `JSON.stringify` silently drops on the next write, and caching disables
+ * itself forever with no error anywhere.
+ */
 export function readCache() {
   try {
     const parsed = JSON.parse(readFileSync(cachePath(), "utf8"))
-    return parsed && typeof parsed === "object" ? parsed : {}
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}
   } catch {
     return {}
   }
@@ -69,7 +87,12 @@ export function getEntry(cache, baseURL, id, ttlMs) {
   const entry = cache?.[keyFor(baseURL, id)]
   if (!entry || typeof entry.probedAt !== "number") return undefined
   const effectiveTtl = ttlMs ?? (entry.conclusive === false ? INCONCLUSIVE_TTL_MS : DEFAULT_TTL_MS)
-  if (Date.now() - entry.probedAt > effectiveTtl) return undefined
+  const age = Date.now() - entry.probedAt
+  // A negative age means `probedAt` is in the future — an NTP correction, a
+  // resumed suspended VM, a dual-boot clock skew. Bound BOTH ends: an entry
+  // must not be immortal just because it looks infinitely fresh, so treat a
+  // future timestamp as expired rather than as the freshest possible entry.
+  if (age < 0 || age > effectiveTtl) return undefined
   return entry
 }
 
@@ -92,15 +115,32 @@ export function setEntry(cache, baseURL, id, entry) {
   }
 }
 
-/** Best-effort persist. A failure here costs a re-probe next start, nothing more. */
+/**
+ * Best-effort persist. A failure here costs a re-probe next start, nothing more.
+ *
+ * Writes to a temp file in the same directory and `rename`s it over the live
+ * path, rather than writing the live path directly: two opencode instances
+ * starting at once (routine — one window per project) is exactly the case a
+ * direct `writeFileSync` would let interleave and clobber, and a concurrent
+ * reader could observe a truncated file mid-write. A same-filesystem rename
+ * is atomic, so a reader always sees either the old file or the fully-written
+ * new one, never a partial write. The temp name includes a random UUID so two
+ * concurrent writers never collide on the same temp path either.
+ */
 export async function writeCache(cache) {
+  const target = cachePath()
+  const dir = path.dirname(target)
+  const tmp = path.join(dir, `.discovery-cache.${randomUUID()}.tmp`)
   try {
-    mkdirSync(path.dirname(cachePath()), { recursive: true, mode: 0o700 })
-    writeFileSync(cachePath(), JSON.stringify(cache), { mode: 0o600 })
-    // writeFileSync's mode only applies when it creates the file; an existing file
-    // keeps its old (possibly world-readable) mode.
-    chmodSync(cachePath(), 0o600)
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    await writeFile(tmp, JSON.stringify(cache), { mode: 0o600 })
+    // writeFile's mode only applies when it creates the file; enforce 0600
+    // explicitly so a stricter umask never leaves the temp file (and thus the
+    // renamed final file) world- or group-readable.
+    await chmod(tmp, 0o600)
+    await rename(tmp, target)
   } catch {
-    // Intentionally silent: see the module comment.
+    // Intentionally silent: see the module comment above.
+    await rm(tmp, { force: true }).catch(() => {})
   }
 }
