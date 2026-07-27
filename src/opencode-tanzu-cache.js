@@ -7,7 +7,7 @@
  * opencode from starting.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -68,6 +68,9 @@ export async function writeCache(cache) {
   try {
     mkdirSync(path.dirname(cachePath()), { recursive: true, mode: 0o700 })
     writeFileSync(cachePath(), JSON.stringify(cache), { mode: 0o600 })
+    // writeFileSync's mode only applies when it creates the file; an existing file
+    // keeps its old (possibly world-readable) mode.
+    chmodSync(cachePath(), 0o600)
   } catch {
     // Intentionally silent: see the module comment.
   }

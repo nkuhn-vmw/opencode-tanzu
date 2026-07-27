@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -83,5 +83,20 @@ test("writeCache swallows a write failure instead of throwing", async () => {
     // A file where the cache directory must go makes mkdir fail.
     writeFileSync(path.dirname(cachePath()), "")
     await writeCache({ x: { context: 1, probedAt: Date.now() } })
+  })
+})
+
+test("writeCache enforces 0600 permissions even when the file already exists", async () => {
+  await withDataHome(async () => {
+    mkdirSync(path.dirname(cachePath()), { recursive: true })
+    // Create cache file with loose permissions (0644).
+    writeFileSync(cachePath(), "{}", { mode: 0o644 })
+    // Verify it was created with loose permissions.
+    assert.equal(statSync(cachePath()).mode & 0o777, 0o644)
+    // Now writeCache should enforce 0600 even on the existing file.
+    const cache = { x: { context: 262144, toolCall: true, probedAt: Date.now() } }
+    await writeCache(cache)
+    // Assert the file now has 0600 permissions.
+    assert.equal(statSync(cachePath()).mode & 0o777, 0o600)
   })
 })
