@@ -17,7 +17,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FILES=(opencode-tanzu.js opencode-tanzu-capabilities.js opencode-tanzu-discovery.js)
+FILES=(opencode-tanzu.js opencode-tanzu-capabilities.js opencode-tanzu-discovery.js opencode-tanzu-cache.js)
 
 MODE="install"
 TARGET_BASE="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
