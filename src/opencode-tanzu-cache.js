@@ -30,6 +30,24 @@ export const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000
 export const INCONCLUSIVE_TTL_MS = 30 * 60 * 1000
 
 /**
+ * Bumped whenever the cache ENTRY shape changes in a way that makes a file
+ * written by older code unsafe to trust as-is. This is the first version to
+ * carry it. No released version of this plugin has ever shipped with a
+ * discovery cache, so the public is unaffected — but this branch runs on the
+ * maintainer's own machines, and an existing `discovery-cache.json` predates
+ * the conclusive/inconclusive TTL split (the C1/C2 fixes): it can hold
+ * `toolCall: false` values produced by the C1 truncation bug and
+ * `context: null` values produced by transient C2-era failures, neither a
+ * real, permanent answer. `readCache` refuses to trust ANY entry from a file
+ * that isn't stamped with the CURRENT version — the whole file is treated as
+ * though it were missing, exactly like a corrupt or unreadable one. That
+ * costs a one-time re-probe per id on the first run after an upgrade
+ * (bounded, same as any cold cache, by `PROBE_ID_CAP`/
+ * `PROBE_CONCURRENCY_LIMIT`), never a stale answer surviving the upgrade.
+ */
+export const CACHE_SCHEMA_VERSION = 1
+
+/**
  * opencode's own data dir — `$XDG_DATA_HOME/opencode`, else
  * `~/.local/share/opencode`. Mirrors Global.Path.data in opencode 1.18.1.
  *
@@ -57,17 +75,26 @@ function keyFor(baseURL, id) {
 }
 
 /**
- * @returns {object} the cache, or {} when missing/corrupt/unreadable
+ * @returns {object} the cache, or {} when missing/corrupt/unreadable/stale-schema
  *
  * `typeof [] === "object"`, so an array on disk must be rejected explicitly —
  * otherwise `setEntry` attaches string-keyed properties to it that
  * `JSON.stringify` silently drops on the next write, and caching disables
  * itself forever with no error anywhere.
+ *
+ * A file whose `schemaVersion` does not match `CACHE_SCHEMA_VERSION` — missing
+ * entirely (every pre-0.2.0 shape) or an older number — is discarded WHOLESALE
+ * rather than partially trusted: see `CACHE_SCHEMA_VERSION` for why entries
+ * from before the conclusive/inconclusive split must not be honored. Starting
+ * fresh here (rather than gating per-entry in `getEntry`) also means a stale
+ * entry can never be "grandfathered in" merely because some OTHER id's probe
+ * later stamps the file with the current version.
  */
 export function readCache() {
   try {
     const parsed = JSON.parse(readFileSync(cachePath(), "utf8"))
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+    return parsed.schemaVersion === CACHE_SCHEMA_VERSION ? parsed : {}
   } catch {
     return {}
   }
@@ -105,8 +132,13 @@ export function getEntry(cache, baseURL, id, ttlMs) {
  *   Pass `false` when either probe that fed this entry was inconclusive, so
  *   `getEntry` retries it after `INCONCLUSIVE_TTL_MS` instead of pinning it
  *   for a week.
+ *
+ * Also stamps `cache.schemaVersion = CACHE_SCHEMA_VERSION` on the cache
+ * object itself, so a freshly (re)probed cache is marked current the moment
+ * anything is written into it — see `CACHE_SCHEMA_VERSION` and `readCache`.
  */
 export function setEntry(cache, baseURL, id, entry) {
+  cache.schemaVersion = CACHE_SCHEMA_VERSION
   cache[keyFor(baseURL, id)] = {
     context: entry.context ?? null,
     toolCall: entry.toolCall ?? null,

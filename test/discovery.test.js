@@ -109,6 +109,38 @@ test("probe returns CLAMPED, not null, when the model answers successfully (olla
   assert.notEqual(ctx, null, "CLAMPED (conclusive) must be distinguishable from null (inconclusive)")
 })
 
+// F2 — a 2xx status alone must not be read as CLAMPED. An OpenAI-compatible
+// gateway or route service can normalize an upstream error into a 200
+// (LiteLLM-style proxies do exactly this), and the real limit still shows up
+// in the message text — it must be parsed and trusted, not discarded in
+// favor of a false-conclusive CLAMPED that pins the model at 8192 for a week.
+test("a 200 carrying a max_model_len error message yields the parsed number, not CLAMPED", async () => {
+  const body = { error: { message: "max_tokens=999999999 cannot be greater than max_model_len=131072." } }
+  const ctx = await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(200, body) })
+  assert.equal(ctx, 131072)
+  assert.notEqual(ctx, CLAMPED, "a real limit delivered on a 200 must be used, not discarded for CLAMPED")
+})
+
+// F2 — a 200 with neither `choices` (a real completion) nor a parseable
+// limit is NOT evidence the backend can never be probed; it is simply a
+// response shape we don't recognize. Must be null (inconclusive, retried
+// soon), not CLAMPED (conclusive, pinned for a week).
+test("a 200 with neither choices nor a parseable limit yields null, not CLAMPED", async () => {
+  const body = { status: "ok" }
+  const ctx = await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(200, body) })
+  assert.equal(ctx, null)
+  assert.notEqual(ctx, CLAMPED, "an unrecognized 200 body must be inconclusive, not a conclusive negative")
+})
+
+// F2 regression guard — a genuine 200 completion (real choices, no
+// parseable limit) must still yield CLAMPED, exactly as the ollama path
+// requires. This is the case the fix must not break while closing the gap.
+test("a genuine 200 completion (has choices) still yields CLAMPED", async () => {
+  const ok = { id: "x", object: "chat.completion", choices: [{ message: { content: "hi" } }] }
+  const ctx = await probeContextLength(BASE, "k", "qwen3:14b", { fetchImpl: stubFetch(200, ok) })
+  assert.equal(ctx, CLAMPED)
+})
+
 test("probe returns null on a network error rather than throwing", async () => {
   const fetchImpl = async () => {
     throw new Error("ECONNREFUSED")

@@ -127,13 +127,39 @@ export const PROBE_CONCURRENCY_LIMIT = 6
  * Hard cap on how many unknown ids are probed in a single startup. A gateway
  * listing 200+ models (or a hostile `/v1/models`) must not turn one cold
  * start into hundreds of simultaneous generation requests against the
- * foundation's scheduler and the laptop's socket table. Ids beyond the cap
- * are simply not probed this run and fall back to the conservative default —
- * exactly as every unknown id behaved before probing existed — and get
- * picked up on a later start (LRU-free: it is always the same prefix of the
- * roster order until the earlier ones are cached).
+ * foundation's scheduler and the laptop's socket table.
+ *
+ * Applied AFTER the cache lookup, to ids still needing a probe — not to the
+ * raw unknown-id list. Capping before the cache check was a real bug: an
+ * already-cached id would still consume a cap slot on every subsequent
+ * start, so the tail beyond the cap was never reached on ANY run, cached or
+ * not. With the cache-first ordering, ids beyond the cap fall back to the
+ * conservative default for this run only and genuinely do get probed on a
+ * later start, once earlier ids are cached (or age out) and free up room.
  */
 export const PROBE_ID_CAP = 25
+
+/**
+ * Overall wall-clock budget for the ENTIRE probe phase of `enrichUnknownCards`
+ * (not a per-request timeout — each probe already has its own 8-second
+ * `AbortSignal.timeout`, see `opencode-tanzu-discovery.js`). This is the
+ * number documented in the README as the probe phase's worst-case stall.
+ *
+ * With `PROBE_CONCURRENCY_LIMIT = 6` and up to `PROBE_ID_CAP = 25` ids to
+ * probe, a worker pool can need up to `ceil(25 / 6) = 5` sequential rounds of
+ * up to 8 seconds each — 40 seconds — if every single request runs to its
+ * own timeout. Before this budget existed, that emergent number was ONLY
+ * documentation, not an enforced bound: if a future change to either
+ * constant (or an unexpectedly slow foundation) pushed the real number past
+ * what the README claimed, nothing in the code would notice or correct it.
+ * This constant is the actual backstop: once it elapses, workers in
+ * `mapWithConcurrency` stop picking up NEW ids (already-in-flight ones still
+ * finish, bounded by their own per-request timeout) and every id not yet
+ * probed simply falls back to the conservative default this run, exactly
+ * like a capped-out or not-yet-reached id — never a thrown error, never a
+ * blocked provider registration.
+ */
+export const PROBE_PHASE_BUDGET_MS = 40_000
 
 /**
  * Run `fn` over `items` with at most `limit` calls in flight at once. A
@@ -145,13 +171,24 @@ export const PROBE_ID_CAP = 25
  * @param {T[]} items
  * @param {number} limit
  * @param {(item: T) => Promise<R>} fn
- * @returns {Promise<R[]>} results in the same order as `items`
+ * @param {{deadlineAt?: number}} [opts] when `deadlineAt` (a `Date.now()`-style
+ *   epoch ms) is given, a worker stops picking up NEW items once the clock
+ *   passes it — an item already in flight still runs to completion (it has
+ *   its own request-level timeout already), so this only bounds how many
+ *   items a worker STARTS, not how long an individual call can take. Items
+ *   never started this way leave a `undefined` hole in the returned array at
+ *   their index; callers must treat a hole exactly like "not attempted this
+ *   run", the same as any id excluded by `PROBE_ID_CAP`.
+ * @returns {Promise<R[]>} results in the same order as `items`, `undefined`
+ *   at indices abandoned to the deadline
  */
-async function mapWithConcurrency(items, limit, fn) {
+async function mapWithConcurrency(items, limit, fn, opts = {}) {
+  const { deadlineAt } = opts
   const results = new Array(items.length)
   let next = 0
   async function worker() {
     for (;;) {
+      if (deadlineAt !== undefined && Date.now() >= deadlineAt) return
       const i = next++
       if (i >= items.length) return
       results[i] = await fn(items[i], i)
@@ -367,11 +404,15 @@ function toolCallOutcome(raw) {
  * resolves twice, or a shared test fixture, must not see one call's probe
  * results bleed into another's.
  *
- * Probing is bounded two ways (an unbounded `Promise.all` fan-out here would
- * let a 200+-model roster fire hundreds of simultaneous generation requests
- * at cold start): at most `PROBE_CONCURRENCY_LIMIT` ids in flight at once,
- * and at most `PROBE_ID_CAP` ids probed per run. Ids beyond the cap fall back
- * to the conservative default, exactly like any other unknown id.
+ * Probing is bounded three ways (an unbounded `Promise.all` fan-out here
+ * would let a 200+-model roster fire hundreds of simultaneous generation
+ * requests at cold start): at most `PROBE_CONCURRENCY_LIMIT` ids in flight at
+ * once, at most `PROBE_ID_CAP` ids probed per run, and the whole phase is
+ * further bounded to `PROBE_PHASE_BUDGET_MS` of wall-clock time regardless of
+ * how many ids that leaves unprobed. Ids left over from any of the three —
+ * capped, or abandoned once the phase budget elapses — fall back to the
+ * conservative default, exactly like any other unknown id, and are picked up
+ * on a later start.
  *
  * @returns {Promise<{cards: {id: string, max_model_len?: number|null}[], toolCalls: Map<string, boolean>}>}
  *   the enriched cards and the probed tool_call verdicts by id
@@ -381,37 +422,70 @@ async function enrichUnknownCards(cards, baseURL, apiKey) {
   const toolCalls = new Map()
   if (unknown.length === 0) return { cards, toolCalls }
 
-  let idsToProbe = unknown
-  if (unknown.length > PROBE_ID_CAP) {
-    idsToProbe = unknown.slice(0, PROBE_ID_CAP)
-    const skipped = unknown.length - PROBE_ID_CAP
-    console.error(
-      `[tanzu] roster has ${unknown.length} unknown models; probing only the first ${PROBE_ID_CAP} this run and ` +
-        `skipping ${skipped} to bound startup request fan-out. Skipped ids keep the conservative default until a ` +
-        `later start probes them.`,
-    )
-  }
-
   const cache = readCache()
   let dirty = false
 
-  const results = await mapWithConcurrency(idsToProbe, PROBE_CONCURRENCY_LIMIT, async (id) => {
+  // Read the cache FIRST, and only apply PROBE_ID_CAP to ids that are not
+  // already answered by a live cache entry. Capping before the cache lookup
+  // was the bug: already-cached ids consumed cap slots on every run, so any
+  // id past the cap was never reached on ANY start, cached or not. Filtering
+  // first means the cap only ever bites into ids that genuinely still need a
+  // network round trip, so the skipped tail really does get picked up on a
+  // later start, once earlier ids age out of cache or the roster shrinks.
+  const stillNeeded = []
+  const cachedResults = []
+  for (const id of unknown) {
     const cached = getEntry(cache, baseURL, id)
-    if (cached) return { id, context: cached.context, toolCall: cached.toolCall }
-    const [rawContext, rawToolCall] = await Promise.all([
-      probeContextLength(baseURL, apiKey, id),
-      probeToolCall(baseURL, apiKey, id),
-    ])
-    const context = contextOutcome(rawContext)
-    const toolCall = toolCallOutcome(rawToolCall)
-    setEntry(cache, baseURL, id, {
-      context: context.value,
-      toolCall: toolCall.value,
-      conclusive: context.conclusive && toolCall.conclusive,
-    })
-    dirty = true
-    return { id, context: context.value, toolCall: toolCall.value }
-  })
+    if (cached) cachedResults.push({ id, context: cached.context, toolCall: cached.toolCall })
+    else stillNeeded.push(id)
+  }
+
+  let idsToProbe = stillNeeded
+  if (stillNeeded.length > PROBE_ID_CAP) {
+    idsToProbe = stillNeeded.slice(0, PROBE_ID_CAP)
+    const skipped = stillNeeded.length - PROBE_ID_CAP
+    console.error(
+      `[tanzu] roster has ${stillNeeded.length} unknown models needing a probe; probing only the first ` +
+        `${PROBE_ID_CAP} this run and skipping ${skipped} to bound startup request fan-out. Skipped ids keep the ` +
+        `conservative default until a later start probes them.`,
+    )
+  }
+
+  const deadlineAt = Date.now() + PROBE_PHASE_BUDGET_MS
+  const rawProbedResults = await mapWithConcurrency(
+    idsToProbe,
+    PROBE_CONCURRENCY_LIMIT,
+    async (id) => {
+      const [rawContext, rawToolCall] = await Promise.all([
+        probeContextLength(baseURL, apiKey, id),
+        probeToolCall(baseURL, apiKey, id),
+      ])
+      const context = contextOutcome(rawContext)
+      const toolCall = toolCallOutcome(rawToolCall)
+      setEntry(cache, baseURL, id, {
+        context: context.value,
+        toolCall: toolCall.value,
+        conclusive: context.conclusive && toolCall.conclusive,
+      })
+      dirty = true
+      return { id, context: context.value, toolCall: toolCall.value }
+    },
+    { deadlineAt },
+  )
+
+  // A hole means a worker stopped picking up new ids once PROBE_PHASE_BUDGET_MS
+  // elapsed. Those ids are simply not in `probedResults` and therefore keep
+  // whatever default `cards.map` below falls back to — never a thrown error.
+  const probedResults = rawProbedResults.filter((r) => r !== undefined)
+  if (probedResults.length < idsToProbe.length) {
+    console.error(
+      `[tanzu] capability probing hit its ${Math.round(PROBE_PHASE_BUDGET_MS / 1000)}s phase budget; ` +
+        `${idsToProbe.length - probedResults.length} of ${idsToProbe.length} ids were not reached this run and ` +
+        `keep the conservative default until a later start probes them.`,
+    )
+  }
+
+  const results = [...cachedResults, ...probedResults]
 
   const byId = new Map(results.map((r) => [r.id, r]))
   const enrichedCards = cards.map((card) => {

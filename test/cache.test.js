@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 
 import {
+  CACHE_SCHEMA_VERSION,
   DEFAULT_TTL_MS,
   INCONCLUSIVE_TTL_MS,
   cachePath,
@@ -15,6 +16,16 @@ import {
 } from "../src/opencode-tanzu-cache.js"
 
 const BASE = "https://genai-proxy.example.test/inst/openai/v1"
+
+/**
+ * `setEntry` now also stamps a `schemaVersion` key onto the cache object
+ * (F5), so `Object.keys(cache)[0]` can no longer be trusted to be the entry
+ * key — it depends on insertion order which key landed first. Pick the one
+ * key that isn't `schemaVersion` instead.
+ */
+function onlyEntryKey(cache) {
+  return Object.keys(cache).find((k) => k !== "schemaVersion")
+}
 
 /** Run `fn` with a scratch XDG_DATA_HOME so cachePath() lands in a temp dir. */
 async function withDataHome(fn) {
@@ -55,6 +66,74 @@ test("an array on disk reads as empty rather than being accepted as the cache", 
   })
 })
 
+// ---------------------------------------------------------------------------
+// F5 — pre-fix cache entries must not survive the upgrade.
+//
+// No released version of this plugin ever shipped a discovery cache, so the
+// public is unaffected — but this branch has run on the maintainer's own
+// machines, and an existing discovery-cache.json predates the
+// conclusive/inconclusive split (C1/C2): it can hold `toolCall: false`
+// entries produced by the C1 truncation bug and `context: null` entries
+// produced by transient C2-era failures, neither a real, permanent answer.
+// `readCache` must refuse the WHOLE file when its `schemaVersion` doesn't
+// match the current one, exactly like a missing or corrupt file — not just
+// individual suspicious-looking entries.
+// ---------------------------------------------------------------------------
+
+test("a cache file with no schemaVersion at all (the exact pre-fix shape) reads as empty", async () => {
+  await withDataHome(() => {
+    mkdirSync(path.dirname(cachePath()), { recursive: true })
+    // The literal shape written by every pre-fix run: a flat map, no
+    // schemaVersion key, entries that look perfectly fresh and conclusive.
+    const legacy = {
+      [`${BASE}\nacme/brand-new-9b`]: { context: null, toolCall: false, conclusive: true, probedAt: Date.now() },
+    }
+    writeFileSync(cachePath(), JSON.stringify(legacy))
+    assert.deepEqual(readCache(), {}, "a file with no schemaVersion must be discarded wholesale, not partially trusted")
+    assert.equal(
+      getEntry(readCache(), BASE, "acme/brand-new-9b"),
+      undefined,
+      "an entry from a schema-less file must not be honored even though it looks fresh and conclusive",
+    )
+  })
+})
+
+test("a cache file with an older schemaVersion reads as empty", async () => {
+  await withDataHome(() => {
+    mkdirSync(path.dirname(cachePath()), { recursive: true })
+    const stale = {
+      schemaVersion: CACHE_SCHEMA_VERSION - 1,
+      [`${BASE}\na/b`]: { context: 262144, toolCall: true, conclusive: true, probedAt: Date.now() },
+    }
+    writeFileSync(cachePath(), JSON.stringify(stale))
+    assert.deepEqual(readCache(), {})
+  })
+})
+
+test("a cache file stamped with the current schemaVersion is honored normally", async () => {
+  await withDataHome(() => {
+    mkdirSync(path.dirname(cachePath()), { recursive: true })
+    const current = {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      [`${BASE}\na/b`]: { context: 262144, toolCall: true, conclusive: true, probedAt: Date.now() },
+    }
+    writeFileSync(cachePath(), JSON.stringify(current))
+    const entry = getEntry(readCache(), BASE, "a/b")
+    assert.notEqual(entry, undefined)
+    assert.equal(entry.context, 262144)
+  })
+})
+
+test("setEntry stamps the current schemaVersion so a freshly-probed cache survives its own next read", async () => {
+  await withDataHome(async () => {
+    const cache = {}
+    setEntry(cache, BASE, "a/b", { context: 1000 })
+    assert.equal(cache.schemaVersion, CACHE_SCHEMA_VERSION)
+    await writeCache(cache)
+    assert.notEqual(getEntry(readCache(), BASE, "a/b"), undefined, "a cache setEntry just wrote must read back as a hit")
+  })
+})
+
 test("an entry round-trips through write and read", async () => {
   await withDataHome(async () => {
     const cache = {}
@@ -69,7 +148,7 @@ test("an entry round-trips through write and read", async () => {
 test("an entry older than the TTL is treated as absent", async () => {
   const cache = {}
   setEntry(cache, BASE, "a/b", { context: 1000 })
-  const key = Object.keys(cache)[0]
+  const key = onlyEntryKey(cache)
   cache[key].probedAt = Date.now() - (DEFAULT_TTL_MS + 1)
   assert.equal(getEntry(cache, BASE, "a/b"), undefined)
 })
@@ -90,7 +169,7 @@ test("a negative result is cached and honored within the TTL", () => {
 test("a conclusive entry survives past the inconclusive TTL and is honored for the full week", () => {
   const cache = {}
   setEntry(cache, BASE, "qwen3:14b", { context: null, toolCall: true, conclusive: true })
-  const key = Object.keys(cache)[0]
+  const key = onlyEntryKey(cache)
   // Well past INCONCLUSIVE_TTL_MS (30m), comfortably inside DEFAULT_TTL_MS (7d).
   cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
   const entry = getEntry(cache, BASE, "qwen3:14b")
@@ -101,7 +180,7 @@ test("a conclusive entry survives past the inconclusive TTL and is honored for t
 test("a conclusive entry does eventually expire, on the long TTL", () => {
   const cache = {}
   setEntry(cache, BASE, "a/b", { context: 262144, conclusive: true })
-  const key = Object.keys(cache)[0]
+  const key = onlyEntryKey(cache)
   cache[key].probedAt = Date.now() - (DEFAULT_TTL_MS + 1)
   assert.equal(getEntry(cache, BASE, "a/b"), undefined)
 })
@@ -112,7 +191,7 @@ test("a conclusive entry does eventually expire, on the long TTL", () => {
 test("an inconclusive entry expires on the short TTL and is retried, not pinned for a week", () => {
   const cache = {}
   setEntry(cache, BASE, "a/b", { context: null, toolCall: null, conclusive: false })
-  const key = Object.keys(cache)[0]
+  const key = onlyEntryKey(cache)
   // Past the 30-minute inconclusive TTL, but nowhere near the 7-day default —
   // a pre-fix cache that applied DEFAULT_TTL_MS uniformly would still call
   // this a hit.
@@ -127,13 +206,17 @@ test("an inconclusive entry is still honored within its short TTL", () => {
   assert.notEqual(entry, undefined, "freshly-written inconclusive entry must still be a hit until it expires")
 })
 
-// A pre-existing entry written before `conclusive` existed has no such field
-// at all. It must keep the original week-long behavior rather than being
-// silently reinterpreted as inconclusive.
+// A caller that writes an entry via `setEntry` without passing `conclusive`
+// (setEntry's own default parameter, not a cross-version compatibility
+// case) keeps the original week-long behavior. Note this is NOT the F5
+// scenario: `setEntry` always stamps the CURRENT `schemaVersion`, so an
+// entry produced this way is never mistaken for a genuine pre-fix file —
+// see the schemaVersion tests below for that real upgrade scenario, which
+// `readCache` guards instead.
 test("an entry with no conclusive field defaults to the long TTL", () => {
   const cache = {}
   setEntry(cache, BASE, "a/b", { context: 1000 })
-  const key = Object.keys(cache)[0]
+  const key = onlyEntryKey(cache)
   cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
   assert.notEqual(getEntry(cache, BASE, "a/b"), undefined, "no conclusive field must default to conclusive:true")
 })
@@ -146,7 +229,7 @@ test("an entry with no conclusive field defaults to the long TTL", () => {
 test("an entry with a probedAt in the future (clock skew) is treated as expired, not immortal", () => {
   const cache = {}
   setEntry(cache, BASE, "a/b", { context: 1000 })
-  const key = Object.keys(cache)[0]
+  const key = onlyEntryKey(cache)
   cache[key].probedAt = Date.now() + 60 * 60 * 1000 // one hour in the future
   assert.equal(
     getEntry(cache, BASE, "a/b"),

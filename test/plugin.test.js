@@ -59,7 +59,12 @@ function writeKeyFile(contents) {
 function ageCacheEntries(ageMs) {
   const file = cachePath()
   const raw = JSON.parse(readFileSync(file, "utf8"))
-  for (const key of Object.keys(raw)) raw[key].probedAt = Date.now() - ageMs
+  // The cache now also carries a top-level `schemaVersion` number (F5) —
+  // skip it, only entries have a `probedAt` to rewind.
+  for (const key of Object.keys(raw)) {
+    if (key === "schemaVersion") continue
+    raw[key].probedAt = Date.now() - ageMs
+  }
   writeFileSync(file, JSON.stringify(raw))
 }
 
@@ -858,6 +863,73 @@ test("a roster with more unknown ids than the cap probes only the cap and skips 
       assert.equal(cfg.provider.tanzu.models["acme/model-0"].limit.context, 262144)
       // Ids beyond the cap were never probed and fall back to the conservative default.
       assert.equal(cfg.provider.tanzu.models[`acme/model-${PROBE_ID_CAP}`].limit.context, CONSERVATIVE_CONTEXT)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// F1 — the cap must be applied AFTER the cache lookup, not before. Pre-fix,
+// enrichUnknownCards sliced the raw unknown-id list to PROBE_ID_CAP and only
+// then read the cache, so already-cached ids kept consuming cap slots on
+// every subsequent run and the tail beyond the cap was never reached on ANY
+// start. This test runs the config hook TWICE against the SAME on-disk cache
+// (shared XDG_DATA_HOME) over PROBE_ID_CAP + N unknown ids and asserts the
+// second run reaches the ids the first run had to skip. It must fail against
+// the pre-fix ordering (cap-then-cache).
+// ---------------------------------------------------------------------------
+
+test("a second start probes the tail the first start's cap skipped, once the head is cached", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const totalUnknown = PROBE_ID_CAP + 3
+      const unknownCards = Array.from({ length: totalUnknown }, (_, i) => ({ id: `acme/model-${i}` }))
+      const impl = async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse({ data: unknownCards })
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+      }
+
+      // Run 1: probes only the first PROBE_ID_CAP ids (0..24); the tail
+      // (25..27) is skipped and falls back to the conservative default.
+      const first = await hooks()
+      const cfg1 = {}
+      await withFetch(impl, () => first.config(cfg1))
+      assert.equal(cfg1.provider.tanzu.models["acme/model-0"].limit.context, 262144)
+      for (let i = PROBE_ID_CAP; i < totalUnknown; i++) {
+        assert.equal(
+          cfg1.provider.tanzu.models[`acme/model-${i}`].limit.context,
+          CONSERVATIVE_CONTEXT,
+          `run 1: id ${i} (past the cap) must not have been probed yet`,
+        )
+      }
+
+      // Run 2, same cache on disk: the first PROBE_ID_CAP ids are now cached
+      // hits and must not consume any cap slots, so the previously-skipped
+      // tail gets probed this time.
+      const probedOnSecondRun = new Set()
+      const impl2 = async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse({ data: unknownCards })
+        probedOnSecondRun.add(JSON.parse(init.body).model)
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+      }
+      const second = await hooks()
+      const cfg2 = {}
+      await withFetch(impl2, () => second.config(cfg2))
+
+      for (let i = PROBE_ID_CAP; i < totalUnknown; i++) {
+        assert.ok(
+          probedOnSecondRun.has(`acme/model-${i}`),
+          `run 2: id ${i} (skipped by run 1's cap) must be probed once the cache no longer holds cap slots hostage`,
+        )
+        assert.equal(
+          cfg2.provider.tanzu.models[`acme/model-${i}`].limit.context,
+          262144,
+          `run 2: previously-skipped id ${i} must now resolve at its served context`,
+        )
+      }
     }),
   )
 })

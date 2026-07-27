@@ -78,6 +78,18 @@ export async function discoverModels(baseURL, apiKey, opts = {}) {
  * a worker mid-restart) and must be retried soon. Caching the two alike is
  * exactly the incident this module exists to prevent: one unlucky startup
  * would otherwise pin a brand-new model at the 8192 default for a week.
+ *
+ * IMPORTANT: a 2xx status alone is NOT sufficient evidence for `CLAMPED`. An
+ * OpenAI-compatible gateway or route service that normalizes an upstream
+ * error into a 200 (LiteLLM-style proxies do exactly this — `200
+ * {"error":{"message":"… max_model_len=131072 …"}}`) would otherwise be read
+ * as "this model can never be probed", pinning it at the 8192 default for a
+ * week and re-entering the very incident this sentinel exists to prevent.
+ * `probeContextLength` therefore always attempts the `max_model_len` parse
+ * FIRST, on any response body, 2xx or not, and only falls back to `CLAMPED`
+ * when the 2xx body actually looks like a completion (`choices` is an
+ * array). Anything else on a 2xx — no `choices`, no parseable limit — is
+ * `null` (inconclusive), not `CLAMPED`.
  */
 export const CLAMPED = Symbol("tanzu:context-clamped")
 
@@ -94,11 +106,17 @@ export const CLAMPED = Symbol("tanzu:context-clamped")
  * the caller on its existing defaults. See `CLAMPED` for the one outcome that
  * is a definite negative rather than an unknown.
  *
+ * The `max_model_len` parse is attempted on EVERY response, 2xx or not,
+ * before any status-code branching — a gateway/route service can deliver the
+ * real limit on a 2xx (see the `CLAMPED` doc above for why `res.ok` alone
+ * must never short-circuit straight to `CLAMPED`).
+ *
  * @returns {Promise<number | typeof CLAMPED | null>}
- *   the served context length; `CLAMPED` when the backend clamped instead of
- *   erroring (conclusive, cache long-term); `null` when inconclusive (network
- *   error, non-JSON body, an error body with no parseable limit) — cache
- *   short-term and retry.
+ *   the served context length (found on either a 2xx or non-2xx body);
+ *   `CLAMPED` only when a 2xx body has no parseable limit but does look like
+ *   a real completion (`choices` is an array) — conclusive, cache long-term;
+ *   `null` when inconclusive (network error, non-JSON body, or a body with
+ *   no parseable limit and no `choices`) — cache short-term and retry.
  */
 export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
   const fetchImpl = opts.fetchImpl ?? fetch
@@ -128,13 +146,40 @@ export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
     return null
   }
 
+  // Try the max_model_len parse FIRST, regardless of status. A 2xx does not
+  // by itself mean "clamped" — a gateway/route service that normalizes an
+  // upstream error into a 200 (LiteLLM-style proxies do exactly this) can
+  // deliver the real limit with the wrong status code. If it parses to a
+  // plausible number, it is a real limit; use it.
+  const parsed = parseMaxModelLen(body)
+  if (typeof parsed === "number") return parsed
+
   if (res.ok) {
-    // A normal 200 completion to a request asking for 999999999 tokens means
-    // the backend clamped rather than validated — it will never error here,
-    // so there is nothing more to learn by retrying. Conclusive.
-    return CLAMPED
+    // No parseable limit on a 2xx. Only call this CLAMPED (conclusive,
+    // cache long-term) when the body actually looks like a chat completion —
+    // a real array of `choices` means the backend genuinely answered rather
+    // than validating, which is the ollama/clamping behavior this sentinel
+    // exists for. Anything else (an unrecognized 200 shape, a proxy's
+    // non-completion 200 body) is inconclusive: we asked and got an answer
+    // we cannot interpret, not proof the backend can never be probed.
+    if (Array.isArray(body?.choices)) return CLAMPED
+    return null
   }
 
+  // Non-2xx with no parseable limit: inconclusive.
+  return null
+}
+
+/**
+ * Pull a `max_model_len` (or `max_total_tokens`) figure out of an error
+ * message, if the body has one and it falls inside the plausible band.
+ * Shared by both the 2xx and non-2xx paths of `probeContextLength` — the
+ * tile can deliver this figure at either status code.
+ *
+ * @returns {number | null} the parsed, plausible context length, or `null`
+ *   when the body has no message, no match, or an implausible value.
+ */
+function parseMaxModelLen(body) {
   const message = body?.error?.message
   if (typeof message !== "string") return null
   const match = message.match(/max_model_len=(?:max_total_tokens=)?(\d+)/)

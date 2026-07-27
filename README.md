@@ -148,13 +148,32 @@ therefore **bundled** with the plugin, hand-sourced from each model's card and `
   support.** The tile strips `max_model_len` from `/v1/models`, but vLLM
   reveals it when asked for an impossible `max_tokens`, so the plugin fires
   two cheap requests per unknown model — one for context length, one for
-  tool-call support, concurrently — and uses the answers. Results (including
-  "could not determine") are cached for a week under
-  `$XDG_DATA_HOME/opencode/opencode-tanzu/discovery-cache.json` (else
-  `~/.local/share/opencode/opencode-tanzu/discovery-cache.json`), so a
-  steady-state start makes no extra requests. Models served through the
-  tile's ollama backend (colon-tag ids like `qwen3:14b`) clamp instead of
-  erroring and cannot be probed — they keep the conservative defaults.
+  tool-call support, concurrently — and uses the answers. Results are cached
+  under `$XDG_DATA_HOME/opencode/opencode-tanzu/discovery-cache.json` (else
+  `~/.local/share/opencode/opencode-tanzu/discovery-cache.json`), but **not
+  all alike**:
+  - A **conclusive** result — a real numeric context, a backend that clamps
+    instead of erroring (the ollama path, see below), or a definite
+    tool-call verdict — is cached for **~7 days**, so a steady-state start
+    makes no extra requests for that model.
+  - An **inconclusive** result — a timeout, an unreachable foundation, a
+    5xx, or any other "we couldn't tell" outcome — is cached for only
+    **~30 minutes** and retried on the next start after that, so one
+    unlucky startup (a flaky VPN, a tile worker restarting) can't pin a
+    brand-new model at the conservative 8192 default for a week.
+  - Models served through the tile's ollama backend (colon-tag ids like
+    `qwen3:14b`) clamp instead of erroring and can never be probed
+    successfully — that is itself a conclusive result, so they keep the
+    conservative defaults and are not re-probed every start either.
+
+  **Deleting the cache file forces every unknown model to be re-probed on
+  the next start** — the plugin degrades to "no cache" exactly like a
+  missing or corrupt one. This is the escape hatch if you suspect a stale or
+  wrong cached value:
+
+  ```bash
+  rm "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode-tanzu/discovery-cache.json"
+  ```
 - If the tile ever stops stripping `max_model_len`, a served context limit overrides the bundled
   one automatically — an operator's `--max-model-len` cap must win over the table.
 - **Embedding and reranking models are excluded by design** — opencode cannot chat with them.
@@ -162,15 +181,19 @@ therefore **bundled** with the plugin, hand-sourced from each model's card and `
 If discovery fails for any reason, the provider **still registers** off the bundled table, with a
 warning on stderr. You never get an empty picker.
 
-**Startup can stall for up to ~28 seconds, in two separate phases.** Roster discovery is awaited
+**Startup can stall for up to ~60 seconds, in two separate phases.** Roster discovery is awaited
 during opencode's `config` hook with a 20-second timeout. When that roster contains ids the
 bundled table has never seen, the plugin then probes each one for its real context window and
-tool-call support, and that probe phase has its own 8-second-per-request timeout — launched in the
-same tick, so it adds up to 8 more seconds on top of the first stall, not 8 seconds per model. A
+tool-call support, in a worker pool of up to 6 concurrent ids at a time (each probe request has its
+own 8-second timeout) capped at 25 ids per run — and the WHOLE probe phase additionally carries an
+overall wall-clock budget, exported as `PROBE_PHASE_BUDGET_MS` (40 seconds), so a run that hits it
+simply stops starting new probes and falls back to the conservative default for whatever it didn't
+reach, rather than the phase's duration being an unenforced side effect of the other constants. 20
+seconds of discovery plus a 40-second probe budget is where the ~60-second worst case comes from. A
 foundation that actively refuses the connection degrades quickly, but one that answers `/v1/models`
 and then silently blackholes `/chat/completions` (a packet-dropping firewall or VPN) will make
-opencode's startup appear to hang for the full ~28 seconds before falling back to the bundled
-table. That is a stall, not a freeze — it resolves on its own.
+opencode's startup appear to hang for close to that full ~60 seconds before falling back to the
+bundled table for whatever wasn't reached. That is a stall, not a freeze — it resolves on its own.
 
 ### Caveat: a hand-pinned roster will be replaced
 
