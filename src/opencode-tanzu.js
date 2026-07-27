@@ -101,7 +101,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { resolveModels, TABLE, unknownChatIds } from "./opencode-tanzu-capabilities.js"
-import { discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "./opencode-tanzu-discovery.js"
+import { CLAMPED, discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "./opencode-tanzu-discovery.js"
 import { getEntry, readCache, setEntry, writeCache } from "./opencode-tanzu-cache.js"
 
 // Former src/index.js entry point, folded in so the installed artifact is the
@@ -282,14 +282,45 @@ async function log(input, level, message) {
 }
 
 /**
+ * Translate `probeContextLength`'s raw result into a cacheable value plus
+ * whether it is a conclusive, permanent answer. `CLAMPED` (the ollama path) is
+ * conclusive with no numeric value; a plain `null` is inconclusive — a
+ * transient failure, not a fact about the model — and must not be pinned
+ * long-term.
+ */
+function contextOutcome(raw) {
+  if (typeof raw === "number") return { value: raw, conclusive: true }
+  if (raw === CLAMPED) return { value: null, conclusive: true }
+  return { value: null, conclusive: false }
+}
+
+/**
+ * Same idea for `probeToolCall`: `true`/`false` are both conclusive (a real
+ * tool call, or a clean completion that declined one); `null` is inconclusive
+ * (network error, non-2xx, or a truncated/ambiguous finish_reason — most
+ * importantly `"length"`, a reasoning model burning its budget on a `<think>`
+ * preamble) and must not be cached as a permanent "no tool support".
+ */
+function toolCallOutcome(raw) {
+  if (typeof raw === "boolean") return { value: raw, conclusive: true }
+  return { value: null, conclusive: false }
+}
+
+/**
  * Fill in what the tile will not tell us. `/v1/models` reports ids only, so a
  * model with no bundled row would otherwise land on the 8192 default and make
  * opencode compact the session in a loop (the INT4 -> NVFP4 swap, 2026-07-24).
  *
  * Only unknown ids are probed — table-backed models keep their curated
- * modalities and tool_call, which no probe can recover — and every result,
- * including a negative one, is cached so a steady-state start issues no
- * requests at all.
+ * modalities and tool_call, which no probe can recover. Every result is
+ * cached, but NOT alike: a conclusive one (a numeric context, a clamped-
+ * forever backend, a definite tool-call verdict) gets the full week-long
+ * `DEFAULT_TTL_MS`, so a steady-state start issues no requests at all. An
+ * inconclusive one (either probe returned `null` — timeout, 5xx, a worker
+ * mid-restart) gets the much shorter `INCONCLUSIVE_TTL_MS` instead, so a
+ * transient failure at startup does not pin a brand-new model at the 8192
+ * default for a week — that would recreate the exact incident this file
+ * exists to fix.
  *
  * DOES NOT MUTATE `cards` OR ANY ELEMENT OF IT. The returned `cards` is a NEW
  * array: entries for probed ids are shallow copies carrying `max_model_len`;
@@ -315,13 +346,19 @@ async function enrichUnknownCards(cards, baseURL, apiKey) {
     unknown.map(async (id) => {
       const cached = getEntry(cache, baseURL, id)
       if (cached) return { id, context: cached.context, toolCall: cached.toolCall }
-      const [context, toolCall] = await Promise.all([
+      const [rawContext, rawToolCall] = await Promise.all([
         probeContextLength(baseURL, apiKey, id),
         probeToolCall(baseURL, apiKey, id),
       ])
-      setEntry(cache, baseURL, id, { context, toolCall })
+      const context = contextOutcome(rawContext)
+      const toolCall = toolCallOutcome(rawToolCall)
+      setEntry(cache, baseURL, id, {
+        context: context.value,
+        toolCall: toolCall.value,
+        conclusive: context.conclusive && toolCall.conclusive,
+      })
       dirty = true
-      return { id, context, toolCall }
+      return { id, context: context.value, toolCall: toolCall.value }
     }),
   )
 

@@ -6,6 +6,7 @@ import path from "node:path"
 
 import { TanzuPlugin, PROVIDER_ID, PROVIDER_NAME, secretPath } from "../src/opencode-tanzu.js"
 import { TABLE } from "../src/opencode-tanzu-capabilities.js"
+import { cachePath } from "../src/opencode-tanzu-cache.js"
 
 // The bundled-fallback roster is every chat entry in the table — derived, not
 // hardcoded, so adding a model (Laguna, 2026-07-22) cannot silently break the
@@ -47,6 +48,19 @@ const NO_ENV = { TANZU_GENAI_BASE_URL: undefined, TANZU_GENAI_API_KEY: undefined
 function writeKeyFile(contents) {
   mkdirSync(path.dirname(secretPath()), { recursive: true })
   writeFileSync(secretPath(), contents)
+}
+
+/**
+ * Rewind every entry in the on-disk discovery cache by `ageMs`, so a test can
+ * simulate "a day later" or "40 minutes later" without a real clock or timers.
+ * Requires `withDataHome` and a prior `.config()` call that populated the
+ * cache file.
+ */
+function ageCacheEntries(ageMs) {
+  const file = cachePath()
+  const raw = JSON.parse(readFileSync(file, "utf8"))
+  for (const key of Object.keys(raw)) raw[key].probedAt = Date.now() - ageMs
+  writeFileSync(file, JSON.stringify(raw))
 }
 
 /** Run `fn` with the given TANZU_GENAI_* env, restoring afterwards. */
@@ -639,6 +653,97 @@ test("a cached probe result means no second probe on the next start", async () =
       await withFetch(impl, () => second.config(cfg2))
       assert.equal(probes, afterFirst, "the second start must be served from cache")
       assert.equal(cfg2.provider.tanzu.models["acme/brand-new-9b"].limit.context, 262144)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// C2 — a conclusive result is pinned for the full week; an inconclusive one
+// is retried once its much shorter TTL elapses. Caching the two alike was
+// the finding: it let one unlucky startup (VPN reconnecting, a tile worker
+// restarting) pin a brand-new model at the 8192 default for seven days, with
+// no way to recover short of clearing the cache by hand.
+// ---------------------------------------------------------------------------
+
+test("a conclusively clamped context probe is cached long-term and is not re-probed a day later", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      let probes = 0
+      const impl = async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        probes += 1
+        // A normal 200 completion to both the context probe (max_tokens
+        // 999999999) and the tool-call probe: the backend clamped instead of
+        // erroring and cleanly declined the forced tool call. Both outcomes
+        // are conclusive, permanent answers — never conflate this with a
+        // transient failure.
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "hi" } }] })
+      }
+      const first = await hooks()
+      await withFetch(impl, () => first.config({}))
+      const afterFirst = probes
+      assert.ok(afterFirst > 0, "the first start must probe")
+
+      // Simulate a day passing: long past the 30-minute inconclusive TTL,
+      // comfortably inside the 7-day conclusive TTL.
+      ageCacheEntries(24 * 60 * 60 * 1000)
+
+      const cfg2 = {}
+      const second = await hooks()
+      await withFetch(impl, () => second.config(cfg2))
+      assert.equal(probes, afterFirst, "a conclusively clamped result must not be re-probed within the week")
+      assert.equal(
+        cfg2.provider.tanzu.models["acme/brand-new-9b"].limit.context,
+        8192,
+        "clamped means unprobeable, not that a numeric value is known — the conservative default stands",
+      )
+    }),
+  )
+})
+
+test("an inconclusive probe is not pinned long-term — it is retried once its short TTL elapses", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      let probes = 0
+      const impl = async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        probes += 1
+        // A transient failure on every probe request — the tile worker
+        // mid-restart. Inconclusive: it says nothing permanent about this
+        // model, and must not be cached as though it did.
+        return jsonResponse({ error: { message: "Service Unavailable" } }, 503)
+      }
+      const first = await hooks()
+      await withFetch(impl, () => first.config({}))
+      const afterFirst = probes
+      assert.ok(afterFirst > 0, "the first start must probe")
+
+      // Past the 30-minute inconclusive TTL — this is the crux: a cache that
+      // (wrongly) applied the 7-day TTL uniformly would still call this a hit,
+      // recreating the original compaction-loop incident.
+      ageCacheEntries(40 * 60 * 1000)
+
+      const cfg2 = {}
+      const second = await hooks()
+      await withFetch(impl, () => second.config(cfg2))
+      assert.ok(probes > afterFirst, "an inconclusive result must be retried once its short TTL elapses")
+    }),
+  )
+})
+
+test("the provider still registers with a non-empty model list when every probe is inconclusive", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        // Every probe request fails outright — DNS/TLS/timeout style.
+        throw new Error("ECONNREFUSED")
+      }, () => h.config(cfg))
+
+      assert.ok(Object.keys(cfg.provider.tanzu.models).length > 0, "the picker must never end up empty")
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 8192)
     }),
   )
 })

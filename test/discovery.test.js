@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "../src/opencode-tanzu-discovery.js"
+import { CLAMPED, discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "../src/opencode-tanzu-discovery.js"
 
 const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/cdc-models.json", import.meta.url)))
 const BASE = "https://genai-proxy.example.test/inst/openai/v1"
@@ -97,11 +97,15 @@ test("probe parses a plain max_model_len= form without the max_total_tokens infi
 })
 
 // ollama silently clamps max_tokens and returns a normal completion, so there
-// is no limit to read. This must be an ordinary null, never a throw.
-test("probe returns null when the model answers successfully (ollama path)", async () => {
+// is no limit to read. That is a CONCLUSIVE, permanent negative (CLAMPED) —
+// distinct from the plain `null` used for a merely inconclusive probe
+// (network error, unparseable body). Conflating the two was Critical finding
+// C2: a transient probe failure must not be cached as if it were this.
+test("probe returns CLAMPED, not null, when the model answers successfully (ollama path)", async () => {
   const ok = { id: "x", object: "chat.completion", choices: [{ message: { content: "hi" } }] }
   const ctx = await probeContextLength(BASE, "k", "qwen3:14b", { fetchImpl: stubFetch(200, ok) })
-  assert.equal(ctx, null)
+  assert.equal(ctx, CLAMPED)
+  assert.notEqual(ctx, null, "CLAMPED (conclusive) must be distinguishable from null (inconclusive)")
 })
 
 test("probe returns null on a network error rather than throwing", async () => {
@@ -169,5 +173,33 @@ test("tool-call probe sends a tool definition and a bounded max_tokens", async (
   await probeToolCall(BASE, "k", "a/b", { fetchImpl })
   assert.equal(seenBody.tools.length, 1)
   assert.equal(seenBody.tools[0].function.name, "ping")
-  assert.ok(seenBody.max_tokens <= 64, "probe must not generate a long reply")
+  // 512, not the old 64: tiny enough to stay cheap, but large enough that a
+  // reasoning model's <think> preamble doesn't eat the whole budget before it
+  // ever reaches a tool call (see the finish_reason:"length" test below).
+  assert.ok(seenBody.max_tokens <= 512, "probe must not generate an unbounded reply")
+})
+
+// C1: the design spec called for a FORCED tool-call request (the `validate.sh`
+// pattern) and the pre-fix implementation never sent it, so a model that
+// simply chose to answer in prose also scored a false "no tool support".
+test("tool-call probe sends tool_choice: required", async () => {
+  let seenBody
+  const fetchImpl = async (url, init) => {
+    seenBody = JSON.parse(init.body)
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "x" } }] }) }
+  }
+  await probeToolCall(BASE, "k", "a/b", { fetchImpl })
+  assert.equal(seenBody.tool_choice, "required")
+})
+
+// C1, the headline regression: a reasoning model (Qwen3/Gemma — exactly what
+// the tile swaps in) can burn its whole token budget inside a <think>
+// preamble and never reach a tool call. The pre-fix probe scored that
+// truncation as a confident, 7-day-cached `false`. It must be `null`
+// (inconclusive) instead.
+test("tool-call probe returns null, not false, on finish_reason: length", async () => {
+  const body = { choices: [{ finish_reason: "length", message: { content: "<think>still thinking" } }] }
+  const result = await probeToolCall(BASE, "k", "a/b", { fetchImpl: stubFetch(200, body) })
+  assert.equal(result, null)
+  assert.notEqual(result, false, "a truncated reply must never be reported as a definitive negative")
 })

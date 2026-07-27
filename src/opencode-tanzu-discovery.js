@@ -67,6 +67,19 @@ export async function discoverModels(baseURL, apiKey, opts = {}) {
 }
 
 /**
+ * Sentinel returned by `probeContextLength` for a backend that clamps
+ * `max_tokens` instead of erroring (ollama-served ids like `qwen3:14b`): it
+ * answers 200 with an ordinary completion and reveals no limit. That is a
+ * CONCLUSIVE, permanent "this model can never be probed this way" — worth the
+ * full cache TTL — and must not be confused with plain `null`, which means
+ * "could not determine right now" (timeout, DNS failure, TLS error, 429, 503,
+ * a worker mid-restart) and must be retried soon. Caching the two alike is
+ * exactly the incident this module exists to prevent: one unlucky startup
+ * would otherwise pin a brand-new model at the 8192 default for a week.
+ */
+export const CLAMPED = Symbol("tanzu:context-clamped")
+
+/**
  * The tile strips max_model_len from /v1/models, but vLLM leaks the real limit
  * in the error it raises for an impossible max_tokens. One cheap request —
  * it fails validation before generating anything — recovers the true context
@@ -75,12 +88,15 @@ export async function discoverModels(baseURL, apiKey, opts = {}) {
  * Verified against the live CDC tile 2026-07-27:
  *   "max_tokens=999999999 cannot be greater than max_model_len=max_total_tokens=262144."
  *
- * Backends that clamp instead of erroring (ollama-served ids like `qwen3:14b`)
- * answer 200 with an ordinary completion and reveal nothing — that is a `null`,
- * not a failure. This function never throws: an inconclusive probe simply
- * leaves the caller on its existing defaults.
+ * This function never throws: every failure path returns `null` and leaves
+ * the caller on its existing defaults. See `CLAMPED` for the one outcome that
+ * is a definite negative rather than an unknown.
  *
- * @returns {Promise<number | null>} the served context length, or null
+ * @returns {Promise<number | typeof CLAMPED | null>}
+ *   the served context length; `CLAMPED` when the backend clamped instead of
+ *   erroring (conclusive, cache long-term); `null` when inconclusive (network
+ *   error, non-JSON body, an error body with no parseable limit) — cache
+ *   short-term and retry.
  */
 export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
   const fetchImpl = opts.fetchImpl ?? fetch
@@ -110,6 +126,13 @@ export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
     return null
   }
 
+  if (res.ok) {
+    // A normal 200 completion to a request asking for 999999999 tokens means
+    // the backend clamped rather than validated — it will never error here,
+    // so there is nothing more to learn by retrying. Conclusive.
+    return CLAMPED
+  }
+
   const message = body?.error?.message
   if (typeof message !== "string") return null
   const match = message.match(/max_model_len=(?:max_total_tokens=)?(\d+)/)
@@ -124,10 +147,27 @@ export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
  * alternative is assuming tool support and letting the agent discover otherwise
  * mid-session.
  *
- * max_tokens is deliberately tiny: a backend that clamps instead of erroring
- * (the ollama path) will actually generate here, and this must stay cheap.
+ * `tool_choice: "required"` actually compels a compliant backend to call the
+ * tool rather than merely offering it — without this, a model that simply
+ * chooses to answer in prose scores a `false` that means nothing. Some
+ * backends reject `tool_choice: "required"` outright; that is a non-2xx and
+ * already falls through the `!res.ok` guard below to `null`, which is the
+ * correct, safe answer for "we couldn't even ask".
  *
- * @returns {Promise<boolean | null>} true/false, or null when inconclusive
+ * max_tokens is 512, not the bare minimum: a reasoning model (Qwen3/Gemma —
+ * exactly what the tile swaps in) can spend its whole budget inside a
+ * `<think>` preamble before ever reaching a tool call. A tiny max_tokens
+ * truncates that preamble and produces `finish_reason: "length"`, which used
+ * to be scored as a confident "no tool support" — a regression versus the
+ * pre-probe behavior, and the reason this must be treated as inconclusive.
+ *
+ * @returns {Promise<boolean | null>}
+ *   `true` for a real `tool_calls` payload (or `finish_reason: "tool_calls"`);
+ *   `false` only for a clean, untruncated completion (`finish_reason: "stop"`)
+ *   that produced no tool call — a genuine negative, safe to cache long-term;
+ *   `null` for everything else (network error, non-2xx, no choices, or any
+ *   other finish_reason — most importantly `"length"`) — inconclusive, cache
+ *   short-term and retry.
  */
 export async function probeToolCall(baseURL, apiKey, id, opts = {}) {
   const fetchImpl = opts.fetchImpl ?? fetch
@@ -152,7 +192,8 @@ export async function probeToolCall(baseURL, apiKey, id, opts = {}) {
             },
           },
         ],
-        max_tokens: 64,
+        tool_choice: "required",
+        max_tokens: 512,
       }),
       signal: AbortSignal.timeout(timeoutMs),
     })
@@ -173,5 +214,9 @@ export async function probeToolCall(baseURL, apiKey, id, opts = {}) {
   if (!Array.isArray(choices) || choices.length === 0) return null
   const choice = choices[0]
   const calls = choice?.message?.tool_calls
-  return (Array.isArray(calls) && calls.length > 0) || choice?.finish_reason === "tool_calls"
+  if ((Array.isArray(calls) && calls.length > 0) || choice?.finish_reason === "tool_calls") return true
+  if (choice?.finish_reason === "stop") return false
+  // Any other finish_reason — "length" above all — means the probe never
+  // reached a conclusive answer. Not evidence of "no support".
+  return null
 }

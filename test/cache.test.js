@@ -6,6 +6,7 @@ import path from "node:path"
 
 import {
   DEFAULT_TTL_MS,
+  INCONCLUSIVE_TTL_MS,
   cachePath,
   getEntry,
   readCache,
@@ -69,6 +70,60 @@ test("a negative result is cached and honored within the TTL", () => {
   const entry = getEntry(cache, BASE, "qwen3:14b")
   assert.notEqual(entry, undefined, "a null-context entry must still be a cache hit")
   assert.equal(entry.context, null)
+})
+
+// C2 — a conclusive entry (a backend that clamps forever, or a definite
+// tool-call verdict) earns the full week: it must NOT be treated as stale
+// just because it is older than the 30-minute inconclusive window.
+test("a conclusive entry survives past the inconclusive TTL and is honored for the full week", () => {
+  const cache = {}
+  setEntry(cache, BASE, "qwen3:14b", { context: null, toolCall: true, conclusive: true })
+  const key = Object.keys(cache)[0]
+  // Well past INCONCLUSIVE_TTL_MS (30m), comfortably inside DEFAULT_TTL_MS (7d).
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
+  const entry = getEntry(cache, BASE, "qwen3:14b")
+  assert.notEqual(entry, undefined, "a conclusive entry must not expire on the short TTL")
+  assert.equal(entry.context, null)
+})
+
+test("a conclusive entry does eventually expire, on the long TTL", () => {
+  const cache = {}
+  setEntry(cache, BASE, "a/b", { context: 262144, conclusive: true })
+  const key = Object.keys(cache)[0]
+  cache[key].probedAt = Date.now() - (DEFAULT_TTL_MS + 1)
+  assert.equal(getEntry(cache, BASE, "a/b"), undefined)
+})
+
+// C2 — an inconclusive entry (timeout, 5xx, a worker mid-restart) must be
+// retried well before the week is up. This is the test that pins the actual
+// bug fix: with the pre-fix cache, this same setup would still be a hit.
+test("an inconclusive entry expires on the short TTL and is retried, not pinned for a week", () => {
+  const cache = {}
+  setEntry(cache, BASE, "a/b", { context: null, toolCall: null, conclusive: false })
+  const key = Object.keys(cache)[0]
+  // Past the 30-minute inconclusive TTL, but nowhere near the 7-day default —
+  // a pre-fix cache that applied DEFAULT_TTL_MS uniformly would still call
+  // this a hit.
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
+  assert.equal(getEntry(cache, BASE, "a/b"), undefined, "an inconclusive entry must be retried after 30 minutes")
+})
+
+test("an inconclusive entry is still honored within its short TTL", () => {
+  const cache = {}
+  setEntry(cache, BASE, "a/b", { context: null, toolCall: null, conclusive: false })
+  const entry = getEntry(cache, BASE, "a/b")
+  assert.notEqual(entry, undefined, "freshly-written inconclusive entry must still be a hit until it expires")
+})
+
+// A pre-existing entry written before `conclusive` existed has no such field
+// at all. It must keep the original week-long behavior rather than being
+// silently reinterpreted as inconclusive.
+test("an entry with no conclusive field defaults to the long TTL", () => {
+  const cache = {}
+  setEntry(cache, BASE, "a/b", { context: 1000 })
+  const key = Object.keys(cache)[0]
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
+  assert.notEqual(getEntry(cache, BASE, "a/b"), undefined, "no conclusive field must default to conclusive:true")
 })
 
 test("entries are scoped per foundation, not shared across base URLs", () => {
