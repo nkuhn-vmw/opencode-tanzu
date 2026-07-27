@@ -65,3 +65,55 @@ export async function discoverModels(baseURL, apiKey, opts = {}) {
   }
   return Array.isArray(body?.data) ? body.data : []
 }
+
+/**
+ * The tile strips max_model_len from /v1/models, but vLLM leaks the real limit
+ * in the error it raises for an impossible max_tokens. One cheap request —
+ * it fails validation before generating anything — recovers the true context
+ * window for a model we have no table row for.
+ *
+ * Verified against the live CDC tile 2026-07-27:
+ *   "max_tokens=999999999 cannot be greater than max_model_len=max_total_tokens=262144."
+ *
+ * Backends that clamp instead of erroring (ollama-served ids like `qwen3:14b`)
+ * answer 200 with an ordinary completion and reveal nothing — that is a `null`,
+ * not a failure. This function never throws: an inconclusive probe simply
+ * leaves the caller on its existing defaults.
+ *
+ * @returns {Promise<number | null>} the served context length, or null
+ */
+export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const timeoutMs = opts.timeoutMs ?? 8000
+  const url = `${baseURL.replace(/\/$/, "")}/chat/completions`
+
+  let res
+  try {
+    res = await fetchImpl(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: id,
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 999999999,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch {
+    return null
+  }
+
+  let body
+  try {
+    body = await res.json()
+  } catch {
+    return null
+  }
+
+  const message = body?.error?.message
+  if (typeof message !== "string") return null
+  const match = message.match(/max_model_len=(?:max_total_tokens=)?(\d+)/)
+  if (!match) return null
+  const context = Number.parseInt(match[1], 10)
+  return Number.isFinite(context) && context > 0 ? context : null
+}
