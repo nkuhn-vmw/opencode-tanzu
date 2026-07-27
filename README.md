@@ -7,7 +7,7 @@ models through its OpenAI-compatible proxy.
 > **Community project. Not supported by Broadcom/VMware.** No warranty, no SLA, not an official
 > distribution. Issues and PRs are welcome, but nothing here is a supported product.
 
-Zero runtime dependencies. Three plain JavaScript files. The source tree **is** the installed
+Zero runtime dependencies. Four plain JavaScript files. The source tree **is** the installed
 artifact — there is nothing to build and no package manager in the install path.
 
 **What you get:**
@@ -37,7 +37,7 @@ git clone https://github.com/nkuhn-vmw/opencode-tanzu.git
 cd opencode-tanzu && ./install.sh
 ```
 
-Both do the same thing: copy the three `src/*.js` files into opencode's global plugin directory
+Both do the same thing: copy the four `src/*.js` files into opencode's global plugin directory
 (`${XDG_CONFIG_HOME:-~/.config}/opencode/plugins/`), where opencode auto-loads them at startup.
 Update with `brew upgrade opencode-tanzu && opencode-tanzu-install` (or `git pull &&
 ./install.sh`); remove with `opencode-tanzu-install --uninstall` (or `./install.sh
@@ -51,7 +51,7 @@ directory instead.
 
 opencode's `plugin` config key auto-installs npm packages — plus their full transitive
 dependency trees — via Bun at startup, on every machine that uses the config. This plugin is
-deliberately distributed as three auditable files copied into the plugin directory instead: what
+deliberately distributed as four auditable files copied into the plugin directory instead: what
 you review is exactly what runs. (The plugin also works packaged via the `plugin` key; it is
 just not the recommended path.)
 </details>
