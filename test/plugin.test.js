@@ -544,3 +544,117 @@ test("the API key prompt rejects whitespace-only input", async () => {
   assert.match(validate("   "), /required/)
   assert.match(validate(undefined), /required/)
 })
+
+// ---------------------------------------------------------------------------
+// Probing wired into the config hook (Task 5).
+// ---------------------------------------------------------------------------
+
+const OVER_LIMIT_400 = {
+  error: { message: "max_tokens=999999999 cannot be greater than max_model_len=max_total_tokens=262144." },
+}
+
+/**
+ * A roster with one id the bundled table has never heard of. A factory, not a
+ * shared constant: unlike a real `fetch(...).json()` (which parses a fresh
+ * object from the wire every call), this file's `jsonResponse` hands back the
+ * literal body object with no cloning — so a single shared object would let
+ * `enrichUnknownCards`'s in-place `card.max_model_len = ...` mutation from one
+ * test bleed into the next.
+ */
+function rosterWithUnknown() {
+  return { data: [{ id: "cyankiwi/Qwen3.6-27B-AWQ-INT4" }, { id: "acme/brand-new-9b" }] }
+}
+
+// REGRESSION (the INT4 -> NVFP4 swap, 2026-07-24): a model id the table does
+// not know must get its real context from a probe, not the 8192 default that
+// makes opencode compact in a loop.
+test("an unknown model is probed and resolves at its served context", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        if (String(url).endsWith("/chat/completions")) {
+          const body = JSON.parse(init.body)
+          if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+          return jsonResponse({ choices: [{ message: { content: "x" } }] })
+        }
+        throw new Error(`unexpected url ${url}`)
+      }, () => h.config(cfg))
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 262144)
+    }),
+  )
+})
+
+test("a model already in the table is never probed", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      let probes = 0
+      await withFetch(async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(ROSTER)
+        probes += 1
+        return jsonResponse(OVER_LIMIT_400, 400)
+      }, () => h.config(cfg))
+      assert.equal(probes, 0, "table-backed models must not cost a request")
+    }),
+  )
+})
+
+test("an unprobeable model keeps the conservative default and still registers", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        // ollama path: a normal completion, no limit to read.
+        return jsonResponse({ choices: [{ message: { content: "hi" } }] })
+      }, () => h.config(cfg))
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 8192)
+    }),
+  )
+})
+
+test("a cached probe result means no second probe on the next start", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      let probes = 0
+      const impl = async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        probes += 1
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ message: { content: "x" } }] })
+      }
+      const first = await hooks()
+      await withFetch(impl, () => first.config({}))
+      const afterFirst = probes
+      assert.ok(afterFirst > 0, "the first start must probe")
+
+      const cfg2 = {}
+      const second = await hooks()
+      await withFetch(impl, () => second.config(cfg2))
+      assert.equal(probes, afterFirst, "the second start must be served from cache")
+      assert.equal(cfg2.provider.tanzu.models["acme/brand-new-9b"].limit.context, 262144)
+    }),
+  )
+})
+
+test("a probed tool_call:false overrides the optimistic default", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "no tools here" } }] })
+      }, () => h.config(cfg))
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].tool_call, false)
+    }),
+  )
+})

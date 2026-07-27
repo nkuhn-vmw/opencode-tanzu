@@ -100,8 +100,9 @@ import { chmod, mkdir, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import { resolveModels, TABLE } from "./opencode-tanzu-capabilities.js"
-import { discoverModels, DiscoveryError } from "./opencode-tanzu-discovery.js"
+import { resolveModels, TABLE, unknownChatIds } from "./opencode-tanzu-capabilities.js"
+import { discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "./opencode-tanzu-discovery.js"
+import { getEntry, readCache, setEntry, writeCache } from "./opencode-tanzu-cache.js"
 
 // Former src/index.js entry point, folded in so the installed artifact is the
 // source tree itself: every file in an opencode plugin dir is loaded, so the
@@ -280,6 +281,53 @@ async function log(input, level, message) {
   }
 }
 
+/**
+ * Fill in what the tile will not tell us. `/v1/models` reports ids only, so a
+ * model with no bundled row would otherwise land on the 8192 default and make
+ * opencode compact the session in a loop (the INT4 -> NVFP4 swap, 2026-07-24).
+ *
+ * Only unknown ids are probed — table-backed models keep their curated
+ * modalities and tool_call, which no probe can recover — and every result,
+ * including a negative one, is cached so a steady-state start issues no
+ * requests at all.
+ *
+ * @returns {Promise<Map<string, boolean>>} probed tool_call verdicts by id
+ */
+async function enrichUnknownCards(cards, baseURL, apiKey) {
+  const unknown = unknownChatIds(cards)
+  const toolCalls = new Map()
+  if (unknown.length === 0) return toolCalls
+
+  const cache = readCache()
+  let dirty = false
+
+  const results = await Promise.all(
+    unknown.map(async (id) => {
+      const cached = getEntry(cache, baseURL, id)
+      if (cached) return { id, context: cached.context, toolCall: cached.toolCall }
+      const [context, toolCall] = await Promise.all([
+        probeContextLength(baseURL, apiKey, id),
+        probeToolCall(baseURL, apiKey, id),
+      ])
+      setEntry(cache, baseURL, id, { context, toolCall })
+      dirty = true
+      return { id, context, toolCall }
+    }),
+  )
+
+  const byId = new Map(results.map((r) => [r.id, r]))
+  for (const card of cards) {
+    const result = byId.get(card?.id)
+    if (!result) continue
+    // applyServedLimit already prefers a card's max_model_len over the table.
+    if (typeof result.context === "number" && result.context > 0) card.max_model_len = result.context
+    if (typeof result.toolCall === "boolean") toolCalls.set(result.id, result.toolCall)
+  }
+
+  if (dirty) await writeCache(cache)
+  return toolCalls
+}
+
 export const TanzuPlugin = async (input) => {
   return {
     config: async (cfg) => {
@@ -303,7 +351,21 @@ export const TanzuPlugin = async (input) => {
         models = tableFallbackModels()
       } else {
         try {
-          models = resolveModels(await discoverModels(creds.baseURL, creds.apiKey))
+          const cards = await discoverModels(creds.baseURL, creds.apiKey)
+          let probedToolCalls = new Map()
+          try {
+            probedToolCalls = await enrichUnknownCards(cards, creds.baseURL, creds.apiKey)
+          } catch (err) {
+            // Enrichment is an optimization. Losing it costs accuracy on
+            // unknown models, never the provider itself.
+            console.error(`[tanzu] capability probing failed: ${err.message}. Using bundled defaults.`)
+          }
+          models = resolveModels(cards)
+          // resolveModels' unknown-default assumes tool_call: true and takes no
+          // per-card hint, so an observed `false` is applied here.
+          for (const [id, toolCall] of probedToolCalls) {
+            if (models[id]) models[id].tool_call = toolCall
+          }
         } catch (err) {
           // Never fail to an empty picker: a zero-model provider is deleted
           // silently and the user gets no signal at all. Degrade to the table.
