@@ -18,7 +18,25 @@
  */
 
 import { TABLE, unknownChatIds } from "../src/opencode-tanzu-capabilities.js"
-import { discoverModels, probeContextLength } from "../src/opencode-tanzu-discovery.js"
+import { CLAMPED, discoverModels, probeContextLength } from "../src/opencode-tanzu-discovery.js"
+
+/**
+ * Render `probeContextLength`'s three possible outcomes for the drift report.
+ * `CLAMPED` is a Symbol, and a Symbol is NOT nullish, so `context ?? "..."`
+ * does not catch it — it throws `TypeError: Cannot convert a Symbol value to
+ * a string` instead of printing anything, aborting the whole report on the
+ * first clamping backend (exactly the ollama-served colon-tag ids this
+ * script's uncovered list is full of). Test the type explicitly instead of
+ * relying on nullish coalescing to distinguish all three outcomes.
+ *
+ * @param {number | typeof CLAMPED | null} context
+ * @returns {string}
+ */
+export function describeProbedContext(context) {
+  if (typeof context === "number") return `probed context: ${context}`
+  if (context === CLAMPED) return "probed context: backend clamps instead of reporting a limit — not probeable"
+  return "probed context: unavailable — backend does not report it"
+}
 
 /**
  * Pure split of a roster against a capability table. Exported for tests; the
@@ -86,7 +104,7 @@ async function main() {
   for (const id of uncoveredChat) {
     if (probe) {
       const context = await probeContextLength(baseURL, apiKey, id)
-      console.log(`  ✗ ${id}  (probed context: ${context ?? "unavailable — backend does not report it"})`)
+      console.log(`  ✗ ${id}  (${describeProbedContext(context)})`)
     } else {
       console.log(`  ✗ ${id}`)
     }

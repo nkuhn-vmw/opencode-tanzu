@@ -182,7 +182,7 @@ export const PROBE_PHASE_BUDGET_MS = 40_000
  * @returns {Promise<R[]>} results in the same order as `items`, `undefined`
  *   at indices abandoned to the deadline
  */
-async function mapWithConcurrency(items, limit, fn, opts = {}) {
+export async function mapWithConcurrency(items, limit, fn, opts = {}) {
   const { deadlineAt } = opts
   const results = new Array(items.length)
   let next = 0
@@ -414,10 +414,15 @@ function toolCallOutcome(raw) {
  * conservative default, exactly like any other unknown id, and are picked up
  * on a later start.
  *
+ * @param {number} [budgetMs] overrides `PROBE_PHASE_BUDGET_MS` for the probe
+ *   phase's wall-clock budget. Defaults to the constant; exists so tests can
+ *   exercise the deadline without a real 40-second wait — see
+ *   `test/plugin.test.js`'s budget-enforcement test, which fails if this
+ *   value (or the `{ deadlineAt }` it feeds `mapWithConcurrency`) is removed.
  * @returns {Promise<{cards: {id: string, max_model_len?: number|null}[], toolCalls: Map<string, boolean>}>}
  *   the enriched cards and the probed tool_call verdicts by id
  */
-async function enrichUnknownCards(cards, baseURL, apiKey) {
+export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROBE_PHASE_BUDGET_MS) {
   const unknown = unknownChatIds(cards)
   const toolCalls = new Map()
   if (unknown.length === 0) return { cards, toolCalls }
@@ -451,7 +456,7 @@ async function enrichUnknownCards(cards, baseURL, apiKey) {
     )
   }
 
-  const deadlineAt = Date.now() + PROBE_PHASE_BUDGET_MS
+  const deadlineAt = Date.now() + budgetMs
   const rawProbedResults = await mapWithConcurrency(
     idsToProbe,
     PROBE_CONCURRENCY_LIMIT,
@@ -479,7 +484,7 @@ async function enrichUnknownCards(cards, baseURL, apiKey) {
   const probedResults = rawProbedResults.filter((r) => r !== undefined)
   if (probedResults.length < idsToProbe.length) {
     console.error(
-      `[tanzu] capability probing hit its ${Math.round(PROBE_PHASE_BUDGET_MS / 1000)}s phase budget; ` +
+      `[tanzu] capability probing hit its ${Math.round(budgetMs / 1000)}s phase budget; ` +
         `${idsToProbe.length - probedResults.length} of ${idsToProbe.length} ids were not reached this run and ` +
         `keep the conservative default until a later start probes them.`,
     )

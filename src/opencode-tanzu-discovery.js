@@ -87,8 +87,10 @@ export async function discoverModels(baseURL, apiKey, opts = {}) {
  * week and re-entering the very incident this sentinel exists to prevent.
  * `probeContextLength` therefore always attempts the `max_model_len` parse
  * FIRST, on any response body, 2xx or not, and only falls back to `CLAMPED`
- * when the 2xx body actually looks like a completion (`choices` is an
- * array). Anything else on a 2xx — no `choices`, no parseable limit — is
+ * when the 2xx body actually looks like a completion (`choices` is a
+ * NON-EMPTY array — an empty array is a 2xx that never actually answered: a
+ * content filter, an aborted upstream, some load-balancer shapes). Anything
+ * else on a 2xx — no `choices`, an empty `choices`, no parseable limit — is
  * `null` (inconclusive), not `CLAMPED`.
  */
 export const CLAMPED = Symbol("tanzu:context-clamped")
@@ -114,9 +116,10 @@ export const CLAMPED = Symbol("tanzu:context-clamped")
  * @returns {Promise<number | typeof CLAMPED | null>}
  *   the served context length (found on either a 2xx or non-2xx body);
  *   `CLAMPED` only when a 2xx body has no parseable limit but does look like
- *   a real completion (`choices` is an array) — conclusive, cache long-term;
- *   `null` when inconclusive (network error, non-JSON body, or a body with
- *   no parseable limit and no `choices`) — cache short-term and retry.
+ *   a real completion (`choices` is a non-empty array) — conclusive, cache
+ *   long-term; `null` when inconclusive (network error, non-JSON body, or a
+ *   body with no parseable limit and no non-empty `choices`) — cache
+ *   short-term and retry.
  */
 export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
   const fetchImpl = opts.fetchImpl ?? fetch
@@ -157,12 +160,17 @@ export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
   if (res.ok) {
     // No parseable limit on a 2xx. Only call this CLAMPED (conclusive,
     // cache long-term) when the body actually looks like a chat completion —
-    // a real array of `choices` means the backend genuinely answered rather
-    // than validating, which is the ollama/clamping behavior this sentinel
-    // exists for. Anything else (an unrecognized 200 shape, a proxy's
-    // non-completion 200 body) is inconclusive: we asked and got an answer
-    // we cannot interpret, not proof the backend can never be probed.
-    if (Array.isArray(body?.choices)) return CLAMPED
+    // a NON-EMPTY array of `choices` means the backend genuinely answered
+    // rather than validating, which is the ollama/clamping behavior this
+    // sentinel exists for. `choices: []` (a content filter, an aborted
+    // upstream, some load-balancer shapes) is NOT a completion, even though
+    // it is a 2xx with an array — treating it as one would pin the model at
+    // the conservative default for a week on the strength of a body that
+    // never actually answered. Anything else (an unrecognized 200 shape, an
+    // empty `choices`, a proxy's non-completion 200 body) is inconclusive: we
+    // asked and got an answer we cannot interpret, not proof the backend can
+    // never be probed.
+    if (Array.isArray(body?.choices) && body.choices.length > 0) return CLAMPED
     return null
   }
 

@@ -11,8 +11,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   for an impossible `max_tokens`, so unknown ids are probed once and cached.
 - Tool-call probing for unknown models, replacing the optimistic assumption that
   every unknown model supports tools.
-- A probe-result cache (`discovery-cache.json`, 7-day TTL) that also remembers
-  negative results, so unprobeable backends are not re-probed every start.
+- A probe-result cache (`discovery-cache.json`) with a conclusive/inconclusive
+  TTL split: a definite answer (a real context number, or a backend that
+  provably clamps instead of reporting a limit) is cached for 7 days, while an
+  inconclusive probe (a timeout, a 5xx, a worker mid-restart) is retried after
+  30 minutes instead of being pinned as if it were permanent. The cache also
+  carries a schema version and discards a file written by an incompatible
+  version rather than trusting a shape it no longer understands.
+- A per-start cap on how many unknown models get probed, a bounded
+  concurrency limit on in-flight probe requests, and an enforced wall-clock
+  budget on the whole probe phase — a foundation with a very large or hostile
+  roster cannot turn one cold start into hundreds of simultaneous generation
+  requests, or stall startup past a fixed ceiling. Models left over from any
+  of the three bounds keep the conservative default this run and are probed
+  on a later start.
 - `scripts/check-roster-drift.mjs` (`npm run drift`) — reports foundation models
   the capability table does not cover, with `--probe` to read their real limits.
 - CI: `node --test` on push and pull request.

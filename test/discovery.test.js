@@ -141,6 +141,20 @@ test("a genuine 200 completion (has choices) still yields CLAMPED", async () => 
   assert.equal(ctx, CLAMPED)
 })
 
+// Finding 3 (Wave 4) — a 2xx `{"choices":[]}` body (a content filter, an
+// aborted upstream, some load-balancer shapes) is NOT proof the backend
+// clamps instead of erroring: it is a 2xx that never actually answered. The
+// pre-fix code tested only `Array.isArray(body?.choices)`, so this body was
+// scored CLAMPED and the model pinned at the conservative default for a
+// week. `probeToolCall` already required a non-empty array; this is the same
+// requirement for `probeContextLength`.
+test("probe returns null, not CLAMPED, on a 200 with an empty choices array", async () => {
+  const body = { id: "x", object: "chat.completion", choices: [] }
+  const ctx = await probeContextLength(BASE, "k", "a/b", { fetchImpl: stubFetch(200, body) })
+  assert.equal(ctx, null)
+  assert.notEqual(ctx, CLAMPED, "an empty choices array is not proof of a real completion")
+})
+
 test("probe returns null on a network error rather than throwing", async () => {
   const fetchImpl = async () => {
     throw new Error("ECONNREFUSED")

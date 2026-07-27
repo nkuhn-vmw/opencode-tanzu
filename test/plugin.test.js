@@ -4,8 +4,16 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSyn
 import os from "node:os"
 import path from "node:path"
 
-import { TanzuPlugin, PROVIDER_ID, PROVIDER_NAME, secretPath, PROBE_ID_CAP } from "../src/opencode-tanzu.js"
-import { TABLE, CONSERVATIVE_CONTEXT } from "../src/opencode-tanzu-capabilities.js"
+import {
+  TanzuPlugin,
+  PROVIDER_ID,
+  PROVIDER_NAME,
+  secretPath,
+  PROBE_ID_CAP,
+  PROBE_CONCURRENCY_LIMIT,
+  enrichUnknownCards,
+} from "../src/opencode-tanzu.js"
+import { TABLE, CONSERVATIVE_CONTEXT, resolveModels } from "../src/opencode-tanzu-capabilities.js"
 import { cachePath } from "../src/opencode-tanzu-cache.js"
 
 // The bundled-fallback roster is every chat entry in the table — derived, not
@@ -802,6 +810,67 @@ test("probes for different unknown ids run concurrently, not serially", async ()
       assert.equal(cfg.provider.tanzu.models["acme/second-9b"].limit.context, 262144)
     }),
   )
+})
+
+// ---------------------------------------------------------------------------
+// Finding 2 (Wave 4) — PROBE_PHASE_BUDGET_MS/deadlineAt had zero coverage.
+// `enrichUnknownCards` takes an optional `budgetMs` override (defaulting to
+// the real 40s constant) purely so this test can exercise the deadline
+// without a real 40-second wait. It proves BOTH halves of the contract: new
+// probes stop starting once the budget elapses (bounded by
+// PROBE_CONCURRENCY_LIMIT, not the full roster), AND every card — probed or
+// not — still comes back, so `resolveModels` still registers a model for
+// each one (unprobed ids simply keep the conservative default).
+//
+// This must fail if the `{ deadlineAt }` wiring into `mapWithConcurrency` (or
+// the guard inside it) is ever removed: with no deadline enforced, a worker
+// pool just keeps picking up items until the roster is exhausted, so ALL
+// ids would end up probed regardless of how tiny `budgetMs` is.
+// ---------------------------------------------------------------------------
+
+test("enrichUnknownCards stops starting new probes once its budget elapses, but still returns every card", async () => {
+  await withDataHome(async () => {
+    const totalUnknown = PROBE_CONCURRENCY_LIMIT + 4
+    const cards = Array.from({ length: totalUnknown }, (_, i) => ({ id: `acme/budget-${i}` }))
+
+    const probedIds = new Set()
+    const impl = async (url, init) => {
+      const body = JSON.parse(init.body)
+      probedIds.add(body.model)
+      // Slow enough that the tiny budget below expires before a worker loops
+      // back for a second item, but no test relies on wall-clock precision
+      // beyond "some delay, then respond".
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+      return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+    }
+
+    const { cards: enriched } = await withFetch(impl, () =>
+      // budgetMs=1: expired before any worker's second iteration, so only the
+      // first PROBE_CONCURRENCY_LIMIT ids picked up synchronously get probed.
+      enrichUnknownCards(cards, BASE, "k", 1),
+    )
+
+    assert.equal(
+      probedIds.size,
+      PROBE_CONCURRENCY_LIMIT,
+      `expected only the first ${PROBE_CONCURRENCY_LIMIT} (concurrency-bounded) ids to be probed before the budget elapsed`,
+    )
+
+    // Every card — probed or not — must still come back, so the provider
+    // still registers a model for each one.
+    assert.equal(enriched.length, totalUnknown, "no card may be dropped just because its probe never started")
+    const models = resolveModels(enriched)
+    assert.equal(Object.keys(models).length, totalUnknown, "the provider must still register every model")
+
+    // The ids abandoned to the deadline never got a max_model_len, so they
+    // keep the conservative default rather than a fabricated number.
+    for (const id of Object.keys(models)) {
+      if (!probedIds.has(id)) {
+        assert.equal(models[id].limit.context, CONSERVATIVE_CONTEXT, `${id} was never probed and must keep the default`)
+      }
+    }
+  })
 })
 
 test("a probed tool_call:false overrides the optimistic default", async () => {
