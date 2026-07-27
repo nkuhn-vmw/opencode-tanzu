@@ -4,8 +4,17 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSyn
 import os from "node:os"
 import path from "node:path"
 
-import { TanzuPlugin, PROVIDER_ID, PROVIDER_NAME, secretPath } from "../src/opencode-tanzu.js"
-import { TABLE } from "../src/opencode-tanzu-capabilities.js"
+import {
+  TanzuPlugin,
+  PROVIDER_ID,
+  PROVIDER_NAME,
+  secretPath,
+  PROBE_ID_CAP,
+  PROBE_CONCURRENCY_LIMIT,
+  enrichUnknownCards,
+} from "../src/opencode-tanzu.js"
+import { TABLE, CONSERVATIVE_CONTEXT, resolveModels } from "../src/opencode-tanzu-capabilities.js"
+import { cachePath } from "../src/opencode-tanzu-cache.js"
 
 // The bundled-fallback roster is every chat entry in the table — derived, not
 // hardcoded, so adding a model (Laguna, 2026-07-22) cannot silently break the
@@ -47,6 +56,24 @@ const NO_ENV = { TANZU_GENAI_BASE_URL: undefined, TANZU_GENAI_API_KEY: undefined
 function writeKeyFile(contents) {
   mkdirSync(path.dirname(secretPath()), { recursive: true })
   writeFileSync(secretPath(), contents)
+}
+
+/**
+ * Rewind every entry in the on-disk discovery cache by `ageMs`, so a test can
+ * simulate "a day later" or "40 minutes later" without a real clock or timers.
+ * Requires `withDataHome` and a prior `.config()` call that populated the
+ * cache file.
+ */
+function ageCacheEntries(ageMs) {
+  const file = cachePath()
+  const raw = JSON.parse(readFileSync(file, "utf8"))
+  // The cache now also carries a top-level `schemaVersion` number (F5) —
+  // skip it, only entries have a `probedAt` to rewind.
+  for (const key of Object.keys(raw)) {
+    if (key === "schemaVersion") continue
+    raw[key].probedAt = Date.now() - ageMs
+  }
+  writeFileSync(file, JSON.stringify(raw))
 }
 
 /** Run `fn` with the given TANZU_GENAI_* env, restoring afterwards. */
@@ -543,4 +570,453 @@ test("the API key prompt rejects whitespace-only input", async () => {
   assert.match(validate(""), /required/)
   assert.match(validate("   "), /required/)
   assert.match(validate(undefined), /required/)
+})
+
+// ---------------------------------------------------------------------------
+// Probing wired into the config hook (Task 5).
+// ---------------------------------------------------------------------------
+
+const OVER_LIMIT_400 = {
+  error: { message: "max_tokens=999999999 cannot be greater than max_model_len=max_total_tokens=262144." },
+}
+
+/**
+ * A roster with one id the bundled table has never heard of. A factory, not a
+ * shared constant: unlike a real `fetch(...).json()` (which parses a fresh
+ * object from the wire every call), this file's `jsonResponse` test helper
+ * hands back the literal body object with no cloning — so a single shared
+ * object literal would still be aliased across every test that called it,
+ * and one test's later mutation of its own `cfg`/roster references could
+ * bleed into another's.
+ */
+function rosterWithUnknown() {
+  return { data: [{ id: "cyankiwi/Qwen3.6-27B-AWQ-INT4" }, { id: "acme/brand-new-9b" }] }
+}
+
+// REGRESSION (the INT4 -> NVFP4 swap, 2026-07-24): a model id the table does
+// not know must get its real context from a probe, not the 8192 default that
+// makes opencode compact in a loop.
+test("an unknown model is probed and resolves at its served context", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        if (String(url).endsWith("/chat/completions")) {
+          const body = JSON.parse(init.body)
+          if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+          return jsonResponse({ choices: [{ message: { content: "x" } }] })
+        }
+        throw new Error(`unexpected url ${url}`)
+      }, () => h.config(cfg))
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 262144)
+    }),
+  )
+})
+
+test("a model already in the table is never probed", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      let probes = 0
+      await withFetch(async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(ROSTER)
+        probes += 1
+        return jsonResponse(OVER_LIMIT_400, 400)
+      }, () => h.config(cfg))
+      assert.equal(probes, 0, "table-backed models must not cost a request")
+    }),
+  )
+})
+
+test("an unprobeable model keeps the conservative default and still registers", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        // ollama path: a normal completion, no limit to read.
+        return jsonResponse({ choices: [{ message: { content: "hi" } }] })
+      }, () => h.config(cfg))
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 8192)
+    }),
+  )
+})
+
+test("a cached probe result means no second probe on the next start", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      let probes = 0
+      const impl = async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        probes += 1
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ message: { content: "x" } }] })
+      }
+      const first = await hooks()
+      await withFetch(impl, () => first.config({}))
+      const afterFirst = probes
+      assert.ok(afterFirst > 0, "the first start must probe")
+
+      const cfg2 = {}
+      const second = await hooks()
+      await withFetch(impl, () => second.config(cfg2))
+      assert.equal(probes, afterFirst, "the second start must be served from cache")
+      assert.equal(cfg2.provider.tanzu.models["acme/brand-new-9b"].limit.context, 262144)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// C2 — a conclusive result is pinned for the full week; an inconclusive one
+// is retried once its much shorter TTL elapses. Caching the two alike was
+// the finding: it let one unlucky startup (VPN reconnecting, a tile worker
+// restarting) pin a brand-new model at the 8192 default for seven days, with
+// no way to recover short of clearing the cache by hand.
+// ---------------------------------------------------------------------------
+
+test("a conclusively clamped context probe is cached long-term and is not re-probed a day later", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      let probes = 0
+      const impl = async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        probes += 1
+        // A normal 200 completion to both the context probe (max_tokens
+        // 999999999) and the tool-call probe: the backend clamped instead of
+        // erroring and cleanly declined the forced tool call. Both outcomes
+        // are conclusive, permanent answers — never conflate this with a
+        // transient failure.
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "hi" } }] })
+      }
+      const first = await hooks()
+      await withFetch(impl, () => first.config({}))
+      const afterFirst = probes
+      assert.ok(afterFirst > 0, "the first start must probe")
+
+      // Simulate a day passing: long past the 30-minute inconclusive TTL,
+      // comfortably inside the 7-day conclusive TTL.
+      ageCacheEntries(24 * 60 * 60 * 1000)
+
+      const cfg2 = {}
+      const second = await hooks()
+      await withFetch(impl, () => second.config(cfg2))
+      assert.equal(probes, afterFirst, "a conclusively clamped result must not be re-probed within the week")
+      assert.equal(
+        cfg2.provider.tanzu.models["acme/brand-new-9b"].limit.context,
+        8192,
+        "clamped means unprobeable, not that a numeric value is known — the conservative default stands",
+      )
+    }),
+  )
+})
+
+test("an inconclusive probe is not pinned long-term — it is retried once its short TTL elapses", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      let probes = 0
+      const impl = async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        probes += 1
+        // A transient failure on every probe request — the tile worker
+        // mid-restart. Inconclusive: it says nothing permanent about this
+        // model, and must not be cached as though it did.
+        return jsonResponse({ error: { message: "Service Unavailable" } }, 503)
+      }
+      const first = await hooks()
+      await withFetch(impl, () => first.config({}))
+      const afterFirst = probes
+      assert.ok(afterFirst > 0, "the first start must probe")
+
+      // Past the 30-minute inconclusive TTL — this is the crux: a cache that
+      // (wrongly) applied the 7-day TTL uniformly would still call this a hit,
+      // recreating the original compaction-loop incident.
+      ageCacheEntries(40 * 60 * 1000)
+
+      const cfg2 = {}
+      const second = await hooks()
+      await withFetch(impl, () => second.config(cfg2))
+      assert.ok(probes > afterFirst, "an inconclusive result must be retried once its short TTL elapses")
+    }),
+  )
+})
+
+test("the provider still registers with a non-empty model list when every probe is inconclusive", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        // Every probe request fails outright — DNS/TLS/timeout style.
+        throw new Error("ECONNREFUSED")
+      }, () => h.config(cfg))
+
+      assert.ok(Object.keys(cfg.provider.tanzu.models).length > 0, "the picker must never end up empty")
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 8192)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// IMPORTANT — cross-id probe concurrency. Every fixture above has exactly one
+// unknown id, so a regression from Promise.all fan-out (over ids) to a serial
+// `for` loop would pass every test above unnoticed. This one uses TWO unknown
+// ids and tracks, via a Set keyed by model id, how many DISTINCT ids have a
+// probe in flight at once. A same-id pair of probes (context + tool_call)
+// cannot push that count past 1 by itself — the Set dedupes the id — so the
+// count only exceeds 1 when two different ids are genuinely in flight
+// together, which is exactly what a serial per-id loop would never allow.
+// ---------------------------------------------------------------------------
+
+test("probes for different unknown ids run concurrently, not serially", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+
+      const inFlightIds = new Set()
+      let maxConcurrentIds = 0
+
+      await withFetch(async (url, init) => {
+        if (String(url).endsWith("/models")) {
+          return jsonResponse({ data: [{ id: "acme/brand-new-9b" }, { id: "acme/second-9b" }] })
+        }
+        const body = JSON.parse(init.body)
+        const id = body.model
+        inFlightIds.add(id)
+        maxConcurrentIds = Math.max(maxConcurrentIds, inFlightIds.size)
+        // Yield a tick before resolving so overlapping in-flight probes have a
+        // chance to accumulate in the Set before any of them clear out of it.
+        // No sleep/timer involved — this is a single microtask tick, and the
+        // synchronous portion of Promise.all's fan-out (every callback runs up
+        // to its first await before the event loop drains any microtask) is
+        // what actually produces the overlap, not this delay.
+        await Promise.resolve()
+        inFlightIds.delete(id)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ message: { content: "x" } }] })
+      }, () => h.config(cfg))
+
+      assert.ok(
+        maxConcurrentIds > 1,
+        `expected probes for different ids to overlap in flight, but max concurrent distinct ids was ${maxConcurrentIds}`,
+      )
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 262144)
+      assert.equal(cfg.provider.tanzu.models["acme/second-9b"].limit.context, 262144)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Finding 2 (Wave 4) — PROBE_PHASE_BUDGET_MS/deadlineAt had zero coverage.
+// `enrichUnknownCards` takes an optional `budgetMs` override (defaulting to
+// the real 40s constant) purely so this test can exercise the deadline
+// without a real 40-second wait. It proves BOTH halves of the contract: new
+// probes stop starting once the budget elapses (bounded by
+// PROBE_CONCURRENCY_LIMIT, not the full roster), AND every card — probed or
+// not — still comes back, so `resolveModels` still registers a model for
+// each one (unprobed ids simply keep the conservative default).
+//
+// This must fail if the `{ deadlineAt }`/`now` wiring into
+// `mapWithConcurrency` (or the guard inside it) is ever removed: with no
+// deadline enforced, a worker pool just keeps picking up items until the
+// roster is exhausted, so ALL ids would end up probed regardless of how the
+// clock behaves.
+//
+// Wave 6: this used to race a real 1ms `budgetMs` against a `setTimeout(30)`
+// in the stubbed fetch, gambling that the worker pool's synchronous startup
+// (checking the deadline, taking an item, invoking `fn`) always beat 1ms of
+// REAL wall-clock time. Under the parallel load of the full suite it did
+// not, always — occasionally the synchronous stretch itself took >1ms,
+// tripping the deadline mid-startup and starting only 4 or 5 of the 6
+// workers instead of all 6 (flaky ~1/3 of full-suite runs). `enrichUnknownCards`
+// and `mapWithConcurrency` now take an injectable `now` (defaulting to
+// `Date.now`, so production behavior is unchanged) purely so a test can
+// swap in a deterministic clock instead of racing the real one. Here `now`
+// reports "not expired" for as long as fewer than PROBE_CONCURRENCY_LIMIT
+// distinct ids have started a probe, and "expired" forever after — tied
+// directly to the invariant under test (not to a wall-clock reading, and
+// not to counting how many times the clock happens to get called), so the
+// outcome no longer depends on how fast this machine executes synchronous
+// JS under load.
+// ---------------------------------------------------------------------------
+
+test("enrichUnknownCards stops starting new probes once its budget elapses, but still returns every card", async () => {
+  await withDataHome(async () => {
+    const totalUnknown = PROBE_CONCURRENCY_LIMIT + 4
+    const cards = Array.from({ length: totalUnknown }, (_, i) => ({ id: `acme/budget-${i}` }))
+
+    const probedIds = new Set()
+    const impl = async (url, init) => {
+      const body = JSON.parse(init.body)
+      probedIds.add(body.model)
+      if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+      return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+    }
+
+    // Deterministic fake clock — see the comment block above. `budgetMs` can
+    // be any positive number: `now()` returns 0 while under the threshold,
+    // so `enrichUnknownCards` computes `deadlineAt = 0 + budgetMs`; once the
+    // threshold is crossed `now()` returns `budgetMs` itself, which trips the
+    // `now() >= deadlineAt` guard on every check from then on.
+    const budgetMs = 1
+    const now = () => (probedIds.size < PROBE_CONCURRENCY_LIMIT ? 0 : budgetMs)
+
+    const { cards: enriched } = await withFetch(impl, () => enrichUnknownCards(cards, BASE, "k", budgetMs, now))
+
+    assert.equal(
+      probedIds.size,
+      PROBE_CONCURRENCY_LIMIT,
+      `expected only the first ${PROBE_CONCURRENCY_LIMIT} (concurrency-bounded) ids to be probed before the budget elapsed`,
+    )
+
+    // Every card — probed or not — must still come back, so the provider
+    // still registers a model for each one.
+    assert.equal(enriched.length, totalUnknown, "no card may be dropped just because its probe never started")
+    const models = resolveModels(enriched)
+    assert.equal(Object.keys(models).length, totalUnknown, "the provider must still register every model")
+
+    // The ids abandoned to the deadline never got a max_model_len, so they
+    // keep the conservative default rather than a fabricated number.
+    for (const id of Object.keys(models)) {
+      if (!probedIds.has(id)) {
+        assert.equal(models[id].limit.context, CONSERVATIVE_CONTEXT, `${id} was never probed and must keep the default`)
+      }
+    }
+  })
+})
+
+test("a probed tool_call:false overrides the optimistic default", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+      await withFetch(async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse(rosterWithUnknown())
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "no tools here" } }] })
+      }, () => h.config(cfg))
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].tool_call, false)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// I2 — unbounded probe fan-out. A roster with more unknown ids than
+// PROBE_ID_CAP must probe only the first PROBE_ID_CAP of them and skip the
+// rest (falling back to the conservative default), logging one clear line
+// about the skip rather than silently firing hundreds of concurrent
+// generation requests at a cold start.
+// ---------------------------------------------------------------------------
+
+test("a roster with more unknown ids than the cap probes only the cap and skips the rest with a logged message", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+
+      const totalUnknown = PROBE_ID_CAP + 10
+      const unknownCards = Array.from({ length: totalUnknown }, (_, i) => ({ id: `acme/model-${i}` }))
+
+      const probedIds = new Set()
+      const errors = []
+      const realError = console.error
+      console.error = (msg) => errors.push(String(msg))
+      try {
+        await withFetch(async (url, init) => {
+          if (String(url).endsWith("/models")) return jsonResponse({ data: unknownCards })
+          const body = JSON.parse(init.body)
+          probedIds.add(body.model)
+          if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+          return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+        }, () => h.config(cfg))
+      } finally {
+        console.error = realError
+      }
+
+      assert.equal(probedIds.size, PROBE_ID_CAP, `expected exactly ${PROBE_ID_CAP} distinct ids to be probed`)
+      assert.ok(
+        errors.some((m) => m.includes(`${totalUnknown}`) && m.includes(`${PROBE_ID_CAP}`) && m.includes("10")),
+        `expected a skip message naming the roster size, the cap, and the skipped count; got: ${JSON.stringify(errors)}`,
+      )
+
+      // Probed ids (the first PROBE_ID_CAP, in roster order) get the served context.
+      assert.equal(cfg.provider.tanzu.models["acme/model-0"].limit.context, 262144)
+      // Ids beyond the cap were never probed and fall back to the conservative default.
+      assert.equal(cfg.provider.tanzu.models[`acme/model-${PROBE_ID_CAP}`].limit.context, CONSERVATIVE_CONTEXT)
+    }),
+  )
+})
+
+// ---------------------------------------------------------------------------
+// F1 — the cap must be applied AFTER the cache lookup, not before. Pre-fix,
+// enrichUnknownCards sliced the raw unknown-id list to PROBE_ID_CAP and only
+// then read the cache, so already-cached ids kept consuming cap slots on
+// every subsequent run and the tail beyond the cap was never reached on ANY
+// start. This test runs the config hook TWICE against the SAME on-disk cache
+// (shared XDG_DATA_HOME) over PROBE_ID_CAP + N unknown ids and asserts the
+// second run reaches the ids the first run had to skip. It must fail against
+// the pre-fix ordering (cap-then-cache).
+// ---------------------------------------------------------------------------
+
+test("a second start probes the tail the first start's cap skipped, once the head is cached", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const totalUnknown = PROBE_ID_CAP + 3
+      const unknownCards = Array.from({ length: totalUnknown }, (_, i) => ({ id: `acme/model-${i}` }))
+      const impl = async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse({ data: unknownCards })
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+      }
+
+      // Run 1: probes only the first PROBE_ID_CAP ids (0..24); the tail
+      // (25..27) is skipped and falls back to the conservative default.
+      const first = await hooks()
+      const cfg1 = {}
+      await withFetch(impl, () => first.config(cfg1))
+      assert.equal(cfg1.provider.tanzu.models["acme/model-0"].limit.context, 262144)
+      for (let i = PROBE_ID_CAP; i < totalUnknown; i++) {
+        assert.equal(
+          cfg1.provider.tanzu.models[`acme/model-${i}`].limit.context,
+          CONSERVATIVE_CONTEXT,
+          `run 1: id ${i} (past the cap) must not have been probed yet`,
+        )
+      }
+
+      // Run 2, same cache on disk: the first PROBE_ID_CAP ids are now cached
+      // hits and must not consume any cap slots, so the previously-skipped
+      // tail gets probed this time.
+      const probedOnSecondRun = new Set()
+      const impl2 = async (url, init) => {
+        if (String(url).endsWith("/models")) return jsonResponse({ data: unknownCards })
+        probedOnSecondRun.add(JSON.parse(init.body).model)
+        const body = JSON.parse(init.body)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
+      }
+      const second = await hooks()
+      const cfg2 = {}
+      await withFetch(impl2, () => second.config(cfg2))
+
+      for (let i = PROBE_ID_CAP; i < totalUnknown; i++) {
+        assert.ok(
+          probedOnSecondRun.has(`acme/model-${i}`),
+          `run 2: id ${i} (skipped by run 1's cap) must be probed once the cache no longer holds cap slots hostage`,
+        )
+        assert.equal(
+          cfg2.provider.tanzu.models[`acme/model-${i}`].limit.context,
+          262144,
+          `run 2: previously-skipped id ${i} must now resolve at its served context`,
+        )
+      }
+    }),
+  )
 })

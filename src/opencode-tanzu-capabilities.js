@@ -11,6 +11,29 @@
 export const CONSERVATIVE_CONTEXT = 8192
 export const CONSERVATIVE_OUTPUT = 4096
 
+/**
+ * Plausibility band for ANY served context length — one this table did not
+ * author itself. Applies to a probe's parsed result (see
+ * `opencode-tanzu-discovery.js`'s `probeContextLength`) and, independently, to
+ * whatever number reaches `applyServedLimit` below, because that value can
+ * come from a hand-edited or corrupt discovery cache and must be re-checked
+ * rather than trusted just because the probe once validated it.
+ *
+ * A value outside this band is not treated as "clamp it into range" — it is
+ * treated as ABSENT, so the model falls back to its table row or the
+ * conservative default instead of silently getting a fabricated limit. 1024
+ * is below any real chat model's context; 4_000_000 is comfortably above the
+ * largest served context in the table (262144) with headroom for a future
+ * long-context model, while still rejecting a mangled/hostile value like
+ * 1e20 that would otherwise disable compaction entirely.
+ */
+export const MIN_PLAUSIBLE_CONTEXT = 1024
+export const MAX_PLAUSIBLE_CONTEXT = 4_000_000
+
+function isPlausibleContext(value) {
+  return Number.isFinite(value) && value >= MIN_PLAUSIBLE_CONTEXT && value <= MAX_PLAUSIBLE_CONTEXT
+}
+
 /** Unknown ids matching this are treated as non-chat and excluded. */
 const NON_CHAT_ID = /embed|rerank/i
 
@@ -114,9 +137,16 @@ function unknownDefaults(id) {
  * The served context wins when the tile reports it — an operator's
  * --max-model-len cap must not be overridden by our table. Forward-compatible:
  * the day the tile stops stripping max_model_len, this starts working for free.
+ *
+ * `maxModelLen` is not trusted merely for being a number: it can arrive from
+ * a hand-edited or corrupt discovery cache as well as a live probe, so it is
+ * re-checked against the same plausibility band the probe itself enforces
+ * (see `MIN_PLAUSIBLE_CONTEXT`/`MAX_PLAUSIBLE_CONTEXT`). A value outside the
+ * band is treated as absent, not clamped into range — clamping would still
+ * silently substitute a fabricated limit for whatever nonsense the cache held.
  */
 function applyServedLimit(meta, maxModelLen) {
-  if (typeof maxModelLen !== "number" || !Number.isFinite(maxModelLen) || maxModelLen <= 0) return meta
+  if (typeof maxModelLen !== "number" || !isPlausibleContext(maxModelLen)) return meta
   return { ...meta, limit: { context: maxModelLen, output: clampOutput(maxModelLen, meta.limit.output) } }
 }
 
@@ -138,6 +168,28 @@ export function resolveModels(cards) {
       meta = unknownDefaults(card.id)
     }
     out[card.id] = applyServedLimit(meta, card.max_model_len)
+  }
+  return out
+}
+
+/**
+ * The ids worth probing: chat models we have no bundled row for. Mirrors the
+ * exclusions `resolveModels` applies, so a probe is never spent on a model that
+ * would be filtered out of the picker anyway.
+ *
+ * @param {{id: string}[]} cards
+ * @returns {string[]} unique unknown chat ids, in roster order
+ */
+export function unknownChatIds(cards) {
+  const out = []
+  const seen = new Set()
+  for (const card of cards ?? []) {
+    const id = card?.id
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    if (TABLE[id]) continue
+    if (NON_CHAT_ID.test(id)) continue
+    out.push(id)
   }
   return out
 }

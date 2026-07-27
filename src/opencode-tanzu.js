@@ -97,11 +97,11 @@
 
 import { readFileSync } from "node:fs"
 import { chmod, mkdir, writeFile } from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 
-import { resolveModels, TABLE } from "./opencode-tanzu-capabilities.js"
-import { discoverModels, DiscoveryError } from "./opencode-tanzu-discovery.js"
+import { resolveModels, TABLE, unknownChatIds } from "./opencode-tanzu-capabilities.js"
+import { CLAMPED, discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "./opencode-tanzu-discovery.js"
+import { dataDir, getEntry, readCache, setEntry, writeCache } from "./opencode-tanzu-cache.js"
 
 // Former src/index.js entry point, folded in so the installed artifact is the
 // source tree itself: every file in an opencode plugin dir is loaded, so the
@@ -115,17 +115,96 @@ function tableFallbackModels() {
   return resolveModels(Object.keys(TABLE).map((id) => ({ id })))
 }
 
-function trimURL(value) {
-  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : ""
-}
+/**
+ * How many unknown ids get probed concurrently. Each probed id fires two
+ * concurrent POSTs (context + tool_call), so this bounds the in-flight
+ * request count to `PROBE_CONCURRENCY_LIMIT * 2` rather than letting a large
+ * roster fire everything in the same tick.
+ */
+export const PROBE_CONCURRENCY_LIMIT = 6
 
 /**
- * opencode's own data dir — `$XDG_DATA_HOME/opencode`, else
- * `~/.local/share/opencode`. Mirrors Global.Path.data in opencode 1.18.1.
+ * Hard cap on how many unknown ids are probed in a single startup. A gateway
+ * listing 200+ models (or a hostile `/v1/models`) must not turn one cold
+ * start into hundreds of simultaneous generation requests against the
+ * foundation's scheduler and the laptop's socket table.
+ *
+ * Applied AFTER the cache lookup, to ids still needing a probe — not to the
+ * raw unknown-id list. Capping before the cache check was a real bug: an
+ * already-cached id would still consume a cap slot on every subsequent
+ * start, so the tail beyond the cap was never reached on ANY run, cached or
+ * not. With the cache-first ordering, ids beyond the cap fall back to the
+ * conservative default for this run only and genuinely do get probed on a
+ * later start, once earlier ids are cached (or age out) and free up room.
  */
-function dataDir() {
-  const xdg = process.env.XDG_DATA_HOME
-  return xdg ? path.join(xdg, "opencode") : path.join(os.homedir(), ".local", "share", "opencode")
+export const PROBE_ID_CAP = 25
+
+/**
+ * Overall wall-clock budget for the ENTIRE probe phase of `enrichUnknownCards`
+ * (not a per-request timeout — each probe already has its own 8-second
+ * `AbortSignal.timeout`, see `opencode-tanzu-discovery.js`). This is the
+ * number documented in the README as the probe phase's worst-case stall.
+ *
+ * With `PROBE_CONCURRENCY_LIMIT = 6` and up to `PROBE_ID_CAP = 25` ids to
+ * probe, a worker pool can need up to `ceil(25 / 6) = 5` sequential rounds of
+ * up to 8 seconds each — 40 seconds — if every single request runs to its
+ * own timeout. Before this budget existed, that emergent number was ONLY
+ * documentation, not an enforced bound: if a future change to either
+ * constant (or an unexpectedly slow foundation) pushed the real number past
+ * what the README claimed, nothing in the code would notice or correct it.
+ * This constant is the actual backstop: once it elapses, workers in
+ * `mapWithConcurrency` stop picking up NEW ids (already-in-flight ones still
+ * finish, bounded by their own per-request timeout) and every id not yet
+ * probed simply falls back to the conservative default this run, exactly
+ * like a capped-out or not-yet-reached id — never a thrown error, never a
+ * blocked provider registration.
+ */
+export const PROBE_PHASE_BUDGET_MS = 40_000
+
+/**
+ * Run `fn` over `items` with at most `limit` calls in flight at once. A
+ * worker-pool, not a batch/chunk split — each worker immediately picks up the
+ * next item as soon as its current one settles, so a slow id never blocks
+ * workers assigned to items after it from starting.
+ *
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T) => Promise<R>} fn
+ * @param {{deadlineAt?: number, now?: () => number}} [opts] when `deadlineAt`
+ *   (an epoch ms in the same units `now()` returns) is given, a worker stops
+ *   picking up NEW items once the clock passes it — an item already in
+ *   flight still runs to completion (it has its own request-level timeout
+ *   already), so this only bounds how many items a worker STARTS, not how
+ *   long an individual call can take. Items never started this way leave a
+ *   `undefined` hole in the returned array at their index; callers must
+ *   treat a hole exactly like "not attempted this run", the same as any id
+ *   excluded by `PROBE_ID_CAP`. `now` defaults to `Date.now` and exists so
+ *   tests can replace the wall clock with a deterministic one — see
+ *   `enrichUnknownCards`'s `now` param and `test/plugin.test.js`'s
+ *   budget-enforcement test, which fails if this guard (or the `deadlineAt`
+ *   wiring feeding it) is removed.
+ * @returns {Promise<R[]>} results in the same order as `items`, `undefined`
+ *   at indices abandoned to the deadline
+ */
+export async function mapWithConcurrency(items, limit, fn, opts = {}) {
+  const { deadlineAt, now = Date.now } = opts
+  const results = new Array(items.length)
+  let next = 0
+  async function worker() {
+    for (;;) {
+      if (deadlineAt !== undefined && now() >= deadlineAt) return
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
+
+function trimURL(value) {
+  return typeof value === "string" ? value.trim().replace(/\/+$/, "") : ""
 }
 
 /**
@@ -280,6 +359,171 @@ async function log(input, level, message) {
   }
 }
 
+/**
+ * Translate `probeContextLength`'s raw result into a cacheable value plus
+ * whether it is a conclusive, permanent answer. `CLAMPED` (the ollama path) is
+ * conclusive with no numeric value; a plain `null` is inconclusive — a
+ * transient failure, not a fact about the model — and must not be pinned
+ * long-term.
+ */
+function contextOutcome(raw) {
+  if (typeof raw === "number") return { value: raw, conclusive: true }
+  if (raw === CLAMPED) return { value: null, conclusive: true }
+  return { value: null, conclusive: false }
+}
+
+/**
+ * Same idea for `probeToolCall`: `true`/`false` are both conclusive (a real
+ * tool call, or a clean completion that declined one); `null` is inconclusive
+ * (network error, non-2xx, or a truncated/ambiguous finish_reason — most
+ * importantly `"length"`, a reasoning model burning its budget on a `<think>`
+ * preamble) and must not be cached as a permanent "no tool support".
+ */
+function toolCallOutcome(raw) {
+  if (typeof raw === "boolean") return { value: raw, conclusive: true }
+  return { value: null, conclusive: false }
+}
+
+/**
+ * Fill in what the tile will not tell us. `/v1/models` reports ids only, so a
+ * model with no bundled row would otherwise land on the 8192 default and make
+ * opencode compact the session in a loop (the INT4 -> NVFP4 swap, 2026-07-24).
+ *
+ * Only unknown ids are probed — table-backed models keep their curated
+ * modalities and tool_call, which no probe can recover. Every result is
+ * cached, but NOT alike: a conclusive one (a numeric context, a clamped-
+ * forever backend, a definite tool-call verdict) gets the full week-long
+ * `DEFAULT_TTL_MS`, so a steady-state start issues no requests at all. An
+ * inconclusive one (either probe returned `null` — timeout, 5xx, a worker
+ * mid-restart) gets the much shorter `INCONCLUSIVE_TTL_MS` instead, so a
+ * transient failure at startup does not pin a brand-new model at the 8192
+ * default for a week — that would recreate the exact incident this file
+ * exists to fix. An id that stays inconclusive on every consecutive attempt
+ * (the tile's ollama-style ids, which clamp `max_tokens` instead of erroring
+ * and so time out the over-limit probe every single time) has that TTL
+ * escalate — see `inconclusiveTtlMs` in opencode-tanzu-cache.js — so it is
+ * retried progressively less often instead of stalling startup on a flat
+ * 30-minute cadence forever.
+ *
+ * DOES NOT MUTATE `cards` OR ANY ELEMENT OF IT. The returned `cards` is a NEW
+ * array: entries for probed ids are shallow copies carrying `max_model_len`;
+ * every other entry (known, or unknown but uninformative) is passed through
+ * by reference, unchanged. This matters because `discoverModels` is the only
+ * thing that has ever made in-place mutation here safe (it hands back a
+ * freshly parsed array every call) — a future caller that discovers once and
+ * resolves twice, or a shared test fixture, must not see one call's probe
+ * results bleed into another's.
+ *
+ * Probing is bounded three ways (an unbounded `Promise.all` fan-out here
+ * would let a 200+-model roster fire hundreds of simultaneous generation
+ * requests at cold start): at most `PROBE_CONCURRENCY_LIMIT` ids in flight at
+ * once, at most `PROBE_ID_CAP` ids probed per run, and the whole phase is
+ * further bounded to `PROBE_PHASE_BUDGET_MS` of wall-clock time regardless of
+ * how many ids that leaves unprobed. Ids left over from any of the three —
+ * capped, or abandoned once the phase budget elapses — fall back to the
+ * conservative default, exactly like any other unknown id, and are picked up
+ * on a later start.
+ *
+ * @param {number} [budgetMs] overrides `PROBE_PHASE_BUDGET_MS` for the probe
+ *   phase's wall-clock budget. Defaults to the constant; exists so tests can
+ *   exercise the deadline without a real 40-second wait.
+ * @param {() => number} [now] clock used both to compute the deadline
+ *   (`now() + budgetMs`) and, threaded through to `mapWithConcurrency`, to
+ *   evaluate it. Defaults to `Date.now`. Exists so a test can replace the
+ *   real wall clock with a deterministic one instead of racing a tiny
+ *   `budgetMs` against real elapsed time — see
+ *   `test/plugin.test.js`'s budget-enforcement test, which fails if this
+ *   value (or the `{ deadlineAt }`/`now` wiring it feeds
+ *   `mapWithConcurrency`) is removed.
+ * @returns {Promise<{cards: {id: string, max_model_len?: number|null}[], toolCalls: Map<string, boolean>}>}
+ *   the enriched cards and the probed tool_call verdicts by id
+ */
+export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROBE_PHASE_BUDGET_MS, now = Date.now) {
+  const unknown = unknownChatIds(cards)
+  const toolCalls = new Map()
+  if (unknown.length === 0) return { cards, toolCalls }
+
+  const cache = readCache()
+  let dirty = false
+
+  // Read the cache FIRST, and only apply PROBE_ID_CAP to ids that are not
+  // already answered by a live cache entry. Capping before the cache lookup
+  // was the bug: already-cached ids consumed cap slots on every run, so any
+  // id past the cap was never reached on ANY start, cached or not. Filtering
+  // first means the cap only ever bites into ids that genuinely still need a
+  // network round trip, so the skipped tail really does get picked up on a
+  // later start, once earlier ids age out of cache or the roster shrinks.
+  const stillNeeded = []
+  const cachedResults = []
+  for (const id of unknown) {
+    const cached = getEntry(cache, baseURL, id)
+    if (cached) cachedResults.push({ id, context: cached.context, toolCall: cached.toolCall })
+    else stillNeeded.push(id)
+  }
+
+  let idsToProbe = stillNeeded
+  if (stillNeeded.length > PROBE_ID_CAP) {
+    idsToProbe = stillNeeded.slice(0, PROBE_ID_CAP)
+    const skipped = stillNeeded.length - PROBE_ID_CAP
+    console.error(
+      `[tanzu] roster has ${stillNeeded.length} unknown models needing a probe; probing only the first ` +
+        `${PROBE_ID_CAP} this run and skipping ${skipped} to bound startup request fan-out. Skipped ids keep the ` +
+        `conservative default until a later start probes them.`,
+    )
+  }
+
+  const deadlineAt = now() + budgetMs
+  const rawProbedResults = await mapWithConcurrency(
+    idsToProbe,
+    PROBE_CONCURRENCY_LIMIT,
+    async (id) => {
+      const [rawContext, rawToolCall] = await Promise.all([
+        probeContextLength(baseURL, apiKey, id),
+        probeToolCall(baseURL, apiKey, id),
+      ])
+      const context = contextOutcome(rawContext)
+      const toolCall = toolCallOutcome(rawToolCall)
+      setEntry(cache, baseURL, id, {
+        context: context.value,
+        toolCall: toolCall.value,
+        conclusive: context.conclusive && toolCall.conclusive,
+      })
+      dirty = true
+      return { id, context: context.value, toolCall: toolCall.value }
+    },
+    { deadlineAt, now },
+  )
+
+  // A hole means a worker stopped picking up new ids once PROBE_PHASE_BUDGET_MS
+  // elapsed. Those ids are simply not in `probedResults` and therefore keep
+  // whatever default `cards.map` below falls back to — never a thrown error.
+  const probedResults = rawProbedResults.filter((r) => r !== undefined)
+  if (probedResults.length < idsToProbe.length) {
+    console.error(
+      `[tanzu] capability probing hit its ${Math.round(budgetMs / 1000)}s phase budget; ` +
+        `${idsToProbe.length - probedResults.length} of ${idsToProbe.length} ids were not reached this run and ` +
+        `keep the conservative default until a later start probes them.`,
+    )
+  }
+
+  const results = [...cachedResults, ...probedResults]
+
+  const byId = new Map(results.map((r) => [r.id, r]))
+  const enrichedCards = cards.map((card) => {
+    const result = byId.get(card?.id)
+    if (!result) return card
+    if (typeof result.toolCall === "boolean") toolCalls.set(result.id, result.toolCall)
+    // applyServedLimit already prefers a card's max_model_len over the table.
+    if (typeof result.context === "number" && result.context > 0) {
+      return { ...card, max_model_len: result.context }
+    }
+    return card
+  })
+
+  if (dirty) await writeCache(cache)
+  return { cards: enrichedCards, toolCalls }
+}
+
 export const TanzuPlugin = async (input) => {
   return {
     config: async (cfg) => {
@@ -303,7 +547,24 @@ export const TanzuPlugin = async (input) => {
         models = tableFallbackModels()
       } else {
         try {
-          models = resolveModels(await discoverModels(creds.baseURL, creds.apiKey))
+          const cards = await discoverModels(creds.baseURL, creds.apiKey)
+          let enrichedCards = cards
+          let probedToolCalls = new Map()
+          try {
+            const enrichment = await enrichUnknownCards(cards, creds.baseURL, creds.apiKey)
+            enrichedCards = enrichment.cards
+            probedToolCalls = enrichment.toolCalls
+          } catch (err) {
+            // Enrichment is an optimization. Losing it costs accuracy on
+            // unknown models, never the provider itself.
+            console.error(`[tanzu] capability probing failed: ${err.message}. Using bundled defaults.`)
+          }
+          models = resolveModels(enrichedCards)
+          // resolveModels' unknown-default assumes tool_call: true and takes no
+          // per-card hint, so an observed `false` is applied here.
+          for (const [id, toolCall] of probedToolCalls) {
+            if (models[id]) models[id].tool_call = toolCall
+          }
         } catch (err) {
           // Never fail to an empty picker: a zero-model provider is deleted
           // silently and the user gets no signal at all. Degrade to the table.
