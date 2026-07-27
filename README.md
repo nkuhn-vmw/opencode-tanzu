@@ -144,6 +144,14 @@ therefore **bundled** with the plugin, hand-sourced from each model's card and `
 - A discovered id **not** in the table still appears, named **`<id> (Tanzu, unverified)`**, with a
   conservative **8192**-token context and 4096-token output. It works; it is just not tuned.
   PRs adding verified entries to `src/opencode-tanzu-capabilities.js` are welcome.
+- **Unknown ids are probed for their real context window.** The tile strips
+  `max_model_len` from `/v1/models`, but vLLM reveals it when asked for an
+  impossible `max_tokens`, so the plugin issues one cheap request per unknown
+  model and uses the answer. Results (including "could not determine") are
+  cached for a week under `$XDG_DATA_HOME/opencode/opencode-tanzu/discovery-cache.json`,
+  so a steady-state start makes no extra requests. Models served through the
+  tile's ollama backend (colon-tag ids like `qwen3:14b`) clamp instead of
+  erroring and cannot be probed — they keep the conservative defaults.
 - If the tile ever stops stripping `max_model_len`, a served context limit overrides the bundled
   one automatically — an operator's `--max-model-len` cap must win over the table.
 - **Embedding and reranking models are excluded by design** — opencode cannot chat with them.
@@ -165,7 +173,60 @@ the bundled table when the foundation is unreachable). Everything else in the st
 (`name`, `npm`, other `options`). If you need a pinned roster, use the
 [config-only fallback](#no-plugin-at-all-the-config-only-fallback) without the plugin.
 
+## When the tile swaps a model
+
+A foundation's served models rotate, and an id changes whenever the quant or the
+serving hardware changes — `poolside/Laguna-S-2.1-INT4` became
+`poolside/Laguna-S-2.1-NVFP4` when CDC moved that model to Blackwell. Because
+the tile does not report `max_model_len`, a new id has no known context window.
+
+The plugin now probes for it automatically, so in most cases there is nothing to
+do. To check a foundation for models the bundled table does not cover:
+
+```bash
+export TANZU_GENAI_BASE_URL="https://genai-proxy.sys.<foundation>/<instance>/openai/v1"
+export TANZU_GENAI_API_KEY="…"     # from `cf service-key <instance> <key>`
+npm run drift -- --probe
+```
+
+To read one model's served limit by hand, ask for an impossible `max_tokens` —
+the error carries the real number:
+
+```bash
+curl -s -H "Authorization: Bearer $TANZU_GENAI_API_KEY" -H "Content-Type: application/json" \
+  "$TANZU_GENAI_BASE_URL/chat/completions" \
+  -d '{"model":"<model-id>","messages":[{"role":"user","content":"hi"}],"max_tokens":999999999}'
+# → max_tokens=999999999 cannot be greater than max_model_len=max_total_tokens=262144
+```
+
+Add a row to `src/opencode-tanzu-capabilities.js` when you want curated metadata
+a probe cannot recover (modalities, a friendly name, a verified `tool_call`).
+PRs welcome.
+
 ## Troubleshooting
+
+**opencode keeps compacting the session / the agent appears to loop**
+Almost always a context-window miss, not a model problem: opencode is compacting
+to stay under a context limit far smaller than the model really has. It happens
+when a served id has no table row and could not be probed. Check what the
+provider actually registered:
+
+```bash
+npm run drift -- --probe
+```
+
+If the model shows up under DRIFT with a probed context, upgrade the plugin
+(`brew upgrade nkuhn-vmw/tap/opencode-tanzu && opencode-tanzu-install`, or
+`git pull && ./install.sh`) and restart opencode — the plugin's model list is
+built at startup. If the probe cannot determine it, pin the limit yourself with
+a `models` override in `~/.config/opencode/opencode.json` (this is a plain
+value, not the `{file:}` indirection that breaks startup):
+
+```json
+{ "provider": { "tanzu": { "models": {
+  "<model-id>": { "limit": { "context": 262144, "output": 32768 } }
+} } } }
+```
 
 **`401` / "The foundation rejected the API key"**
 The bearer token is an ephemeral JWT and expires. Fetch a fresh one from your service key
@@ -192,7 +253,7 @@ Verified against opencode 1.18.1.
 ## Development
 
 ```bash
-npm test          # node --test; 40 tests, no dependencies
+npm test          # node --test; 76 tests, no dependencies
 ```
 
 The plugin registers its provider through opencode's plugin `config`/`auth` hooks. The provider
@@ -201,6 +262,14 @@ verified end-to-end against **opencode 1.18.1**. If an opencode release changes 
 expect this repo to need a follow-up — pin your opencode version if that matters to you.
 
 Requires Node ≥ 20 (for `node --test`); the plugin itself runs inside opencode's runtime.
+
+## Roadmap
+
+Listing Tanzu in [models.dev](https://github.com/anomalyco/models.dev) — the
+registry opencode reads its built-in provider catalog from — would make `tanzu`
+a first-class provider id rather than one this plugin contributes. That is a
+metadata-only PR upstream; this plugin would remain the home for live roster
+discovery and the login flow, which a static registry entry cannot provide.
 
 ## License
 
