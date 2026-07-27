@@ -10,6 +10,7 @@ import {
   INCONCLUSIVE_TTL_MS,
   cachePath,
   getEntry,
+  inconclusiveTtlMs,
   readCache,
   setEntry,
   writeCache,
@@ -204,6 +205,137 @@ test("an inconclusive entry is still honored within its short TTL", () => {
   setEntry(cache, BASE, "a/b", { context: null, toolCall: null, conclusive: false })
   const entry = getEntry(cache, BASE, "a/b")
   assert.notEqual(entry, undefined, "freshly-written inconclusive entry must still be a hit until it expires")
+})
+
+// ---------------------------------------------------------------------------
+// Inconclusive backoff — an id that is inconclusive on EVERY attempt (the
+// tile's ollama-style ids: qwen3:14b, qwen3:30b-a3b, gemma4:e4b,
+// hf.co/prism-ml/Bonsai-8B-gguf:Q1_0 — clamp max_tokens instead of erroring,
+// so the over-limit probe times out every single time) must back off rather
+// than being re-probed on a flat 30-minute cadence forever. A single miss
+// must still behave exactly like the pre-backoff flat TTL — that is the C2
+// guarantee, and must not regress just because escalation now exists.
+// ---------------------------------------------------------------------------
+
+test("a first inconclusive result is still retried after ~INCONCLUSIVE_TTL_MS (C2 guarantee, unchanged by backoff)", () => {
+  const cache = {}
+  setEntry(cache, BASE, "qwen3:14b", { context: null, toolCall: null, conclusive: false })
+  const key = onlyEntryKey(cache)
+  assert.equal(cache[key].attempts, 1, "the first inconclusive result must record exactly one attempt")
+  // Just before the base TTL: still a hit.
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS - 1000)
+  assert.notEqual(getEntry(cache, BASE, "qwen3:14b"), undefined, "a first miss must still be honored inside ~30 minutes")
+  // Just past the base TTL: must expire and be retried, exactly like before backoff existed.
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
+  assert.equal(getEntry(cache, BASE, "qwen3:14b"), undefined, "a first miss must still expire at ~30 minutes, not later")
+})
+
+test("repeated inconclusive results escalate the retry TTL on a doubling schedule (30m, 1h, 2h, 4h, ...)", () => {
+  const cache = {}
+  setEntry(cache, BASE, "qwen3:14b", { conclusive: false }) // attempt 1 -> 30m
+  setEntry(cache, BASE, "qwen3:14b", { conclusive: false }) // attempt 2 -> 1h
+  setEntry(cache, BASE, "qwen3:14b", { conclusive: false }) // attempt 3 -> 2h
+  const key = onlyEntryKey(cache)
+  assert.equal(cache[key].attempts, 3, "three consecutive inconclusive results must record three attempts")
+
+  assert.equal(inconclusiveTtlMs(1), INCONCLUSIVE_TTL_MS)
+  assert.equal(inconclusiveTtlMs(2), INCONCLUSIVE_TTL_MS * 2)
+  assert.equal(inconclusiveTtlMs(3), INCONCLUSIVE_TTL_MS * 4)
+
+  // Past the FLAT 30-minute TTL but well inside the escalated ~2h TTL the
+  // third miss actually earns: a flat-TTL implementation would wrongly
+  // expire this and re-probe every 30 minutes forever, which is the exact
+  // regression this schedule exists to fix.
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS * 2 + 60 * 1000)
+  assert.notEqual(
+    getEntry(cache, BASE, "qwen3:14b"),
+    undefined,
+    "a third consecutive miss must survive well past the flat 30-minute TTL",
+  )
+
+  // Past its OWN escalated TTL (2h): must still eventually expire and retry.
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS * 4 + 60 * 1000)
+  assert.equal(
+    getEntry(cache, BASE, "qwen3:14b"),
+    undefined,
+    "a third consecutive miss must still expire at its own ~2h TTL",
+  )
+})
+
+test("the escalated TTL is capped at DEFAULT_TTL_MS and never exceeds it", () => {
+  // Directly: a huge attempts count must not escalate past the cap.
+  assert.equal(inconclusiveTtlMs(100), DEFAULT_TTL_MS, "the schedule must cap at DEFAULT_TTL_MS, not grow unbounded")
+
+  const cache = {}
+  for (let i = 0; i < 20; i++) setEntry(cache, BASE, "qwen3:14b", { conclusive: false })
+  const key = onlyEntryKey(cache)
+  assert.equal(cache[key].attempts, 20)
+
+  // Just inside the cap: still a hit.
+  cache[key].probedAt = Date.now() - (DEFAULT_TTL_MS - 1000)
+  assert.notEqual(getEntry(cache, BASE, "qwen3:14b"), undefined, "an entry within the capped TTL must be a hit")
+
+  // Just past the cap: must expire — 20 consecutive misses must never earn
+  // MORE retry headroom than a conclusive result gets.
+  cache[key].probedAt = Date.now() - (DEFAULT_TTL_MS + 1000)
+  assert.equal(
+    getEntry(cache, BASE, "qwen3:14b"),
+    undefined,
+    "even after many consecutive misses the TTL must not exceed DEFAULT_TTL_MS",
+  )
+})
+
+test("a conclusive result resets the consecutive-inconclusive escalation to zero", () => {
+  const cache = {}
+  setEntry(cache, BASE, "qwen3:14b", { conclusive: false })
+  setEntry(cache, BASE, "qwen3:14b", { conclusive: false })
+  let key = onlyEntryKey(cache)
+  assert.equal(cache[key].attempts, 2, "two consecutive misses must record two attempts before the reset")
+
+  setEntry(cache, BASE, "qwen3:14b", { context: 131072, conclusive: true })
+  key = onlyEntryKey(cache)
+  assert.equal(cache[key].attempts, 0, "a conclusive result must reset the consecutive-inconclusive count to zero")
+
+  // The schedule must restart from the first-miss TTL, not continue as if
+  // escalation had never been reset.
+  cache[key].probedAt = Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000)
+  assert.notEqual(
+    getEntry(cache, BASE, "qwen3:14b"),
+    undefined,
+    "a conclusive entry must be honored for the full week regardless of prior escalation",
+  )
+
+  setEntry(cache, BASE, "qwen3:14b", { conclusive: false })
+  assert.equal(cache[key].attempts, 1, "the next inconclusive result after a reset must start the schedule over at attempt 1")
+})
+
+// An entry written by pre-backoff code (or any hand-edited/malformed cache)
+// has no `attempts` field at all. This must default to the FIRST-miss TTL
+// (~30 minutes) — exactly the flat behavior every inconclusive entry already
+// had — never to an already-escalated one. Treating a missing field as "many
+// attempts" would silently pin a brand-new inconclusive entry at a long TTL
+// with no probe ever having actually failed that many times; treating it as
+// "zero" would conflict with `getEntry`'s `entry.conclusive === false` check
+// already selecting the inconclusive branch. "first miss" is the only
+// reading consistent with the pre-existing flat TTL, which is exactly why no
+// CACHE_SCHEMA_VERSION bump was needed for this field — see the comment on
+// CACHE_SCHEMA_VERSION in opencode-tanzu-cache.js.
+test("an entry missing the attempts field defaults to a first-miss TTL, not an already-escalated one", () => {
+  const cache = {}
+  const key = `${BASE}\nqwen3:14b`
+  cache[key] = {
+    context: null,
+    toolCall: null,
+    conclusive: false,
+    // No `attempts` field — the exact shape written before this change.
+    probedAt: Date.now() - (INCONCLUSIVE_TTL_MS + 60 * 1000),
+  }
+  assert.equal(
+    getEntry(cache, BASE, "qwen3:14b"),
+    undefined,
+    "a missing attempts field must behave like attempt 1 (expires at ~30m), matching pre-backoff flat-TTL behavior",
+  )
+  assert.equal(inconclusiveTtlMs(undefined), INCONCLUSIVE_TTL_MS, "inconclusiveTtlMs must treat a missing count as a first miss")
 })
 
 // A caller that writes an entry via `setEntry` without passing `conclusive`

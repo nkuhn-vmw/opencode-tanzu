@@ -18,6 +18,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   30 minutes instead of being pinned as if it were permanent. The cache also
   carries a schema version and discards a file written by an incompatible
   version rather than trusting a shape it no longer understands.
+- Exponential backoff for a model that comes back inconclusive on every
+  consecutive attempt (30m → 1h → 2h → 4h → ..., capped at the same 7-day TTL
+  a conclusive result gets). Some ollama-style backends (colon-tag ids like
+  `qwen3:14b`, `hf.co/...`-style ids) clamp `max_tokens` instead of erroring
+  but are slow enough that they never answer inside the probe's timeout —
+  every probe against them is inconclusive, so without backoff they were
+  re-probed (and re-stalled opencode's startup by several seconds) every 30
+  minutes forever. A single conclusive result still resets the count, and a
+  first-ever inconclusive result is still retried after ~30 minutes — a
+  one-off timeout still cannot pin a model long-term.
 - A per-start cap on how many unknown models get probed, a bounded
   concurrency limit on in-flight probe requests, and an enforced wall-clock
   budget on the whole probe phase — a foundation with a very large or hostile

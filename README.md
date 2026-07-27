@@ -158,13 +158,28 @@ therefore **bundled** with the plugin, hand-sourced from each model's card and `
     makes no extra requests for that model.
   - An **inconclusive** result — a timeout, an unreachable foundation, a
     5xx, or any other "we couldn't tell" outcome — is cached for only
-    **~30 minutes** and retried on the next start after that, so one
-    unlucky startup (a flaky VPN, a tile worker restarting) can't pin a
-    brand-new model at the conservative 8192 default for a week.
+    **~30 minutes** on the first miss, so one unlucky startup (a flaky VPN,
+    a tile worker restarting) can't pin a brand-new model at the
+    conservative 8192 default for a week. Each further CONSECUTIVE
+    inconclusive result for that same model doubles the retry interval
+    (30m → 1h → 2h → 4h → ...), capped at the same **~7 days** a conclusive
+    result gets — so a model that is inconclusive on every attempt settles
+    into progressively rarer retries instead of re-probing (and re-paying
+    the probe's request cost) on a fixed 30-minute cadence forever. A single
+    conclusive result resets the count back to zero.
   - Models served through the tile's ollama backend (colon-tag ids like
-    `qwen3:14b`) clamp instead of erroring and can never be probed
-    successfully — that is itself a conclusive result, so they keep the
-    conservative defaults and are not re-probed every start either.
+    `qwen3:14b`, or `hf.co/...`-style ids) clamp `max_tokens` instead of
+    erroring. When that clamp answers quickly enough for the probe to see a
+    real completion, it's scored a conclusive `CLAMPED` result and cached
+    for the full week, same as any other conclusive answer. But some of
+    these backends are slow enough — they're actually generating a full
+    response instead of failing validation — that they never answer inside
+    the probe's 8-second timeout at all, so every probe against them is
+    inconclusive. Those ids are un-probeable in practice and are exactly
+    what the backoff above exists for: rather than re-stalling opencode's
+    startup by ~8 seconds every 30 minutes forever, they back off to
+    ever-longer retry intervals while still keeping the conservative
+    defaults.
 
   **Deleting the cache file forces every unknown model to be re-probed on
   the next start** — the plugin degrades to "no cache" exactly like a

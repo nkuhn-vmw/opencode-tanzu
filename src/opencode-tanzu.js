@@ -393,7 +393,12 @@ function toolCallOutcome(raw) {
  * mid-restart) gets the much shorter `INCONCLUSIVE_TTL_MS` instead, so a
  * transient failure at startup does not pin a brand-new model at the 8192
  * default for a week — that would recreate the exact incident this file
- * exists to fix.
+ * exists to fix. An id that stays inconclusive on every consecutive attempt
+ * (the tile's ollama-style ids, which clamp `max_tokens` instead of erroring
+ * and so time out the over-limit probe every single time) has that TTL
+ * escalate — see `inconclusiveTtlMs` in opencode-tanzu-cache.js — so it is
+ * retried progressively less often instead of stalling startup on a flat
+ * 30-minute cadence forever.
  *
  * DOES NOT MUTATE `cards` OR ANY ELEMENT OF IT. The returned `cards` is a NEW
  * array: entries for probed ids are shallow copies carrying `max_model_len`;
