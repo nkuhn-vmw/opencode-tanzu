@@ -109,10 +109,12 @@ async function main() {
       console.log(`  ✗ ${id}`)
     }
   }
+  // Only suggest --probe when it was not already used; being told to re-run a
+  // flag you just passed reads as the report ignoring you.
   console.log(
     "\nThese resolve to a conservative 8192 context unless probing recovers the real one at runtime.\n" +
-      "Re-run with --probe to read each model's served limit, then add a row to\n" +
-      "src/opencode-tanzu-capabilities.js for curated metadata (modalities, tool_call).",
+      (probe ? "" : "Re-run with --probe to read each model's served limit.\n") +
+      "Add a row to src/opencode-tanzu-capabilities.js for curated metadata (modalities, tool_call).",
   )
   return 1
 }
