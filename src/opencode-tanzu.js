@@ -291,12 +291,22 @@ async function log(input, level, message) {
  * including a negative one, is cached so a steady-state start issues no
  * requests at all.
  *
- * @returns {Promise<Map<string, boolean>>} probed tool_call verdicts by id
+ * DOES NOT MUTATE `cards` OR ANY ELEMENT OF IT. The returned `cards` is a NEW
+ * array: entries for probed ids are shallow copies carrying `max_model_len`;
+ * every other entry (known, or unknown but uninformative) is passed through
+ * by reference, unchanged. This matters because `discoverModels` is the only
+ * thing that has ever made in-place mutation here safe (it hands back a
+ * freshly parsed array every call) — a future caller that discovers once and
+ * resolves twice, or a shared test fixture, must not see one call's probe
+ * results bleed into another's.
+ *
+ * @returns {Promise<{cards: {id: string, max_model_len?: number|null}[], toolCalls: Map<string, boolean>}>}
+ *   the enriched cards and the probed tool_call verdicts by id
  */
 async function enrichUnknownCards(cards, baseURL, apiKey) {
   const unknown = unknownChatIds(cards)
   const toolCalls = new Map()
-  if (unknown.length === 0) return toolCalls
+  if (unknown.length === 0) return { cards, toolCalls }
 
   const cache = readCache()
   let dirty = false
@@ -316,16 +326,19 @@ async function enrichUnknownCards(cards, baseURL, apiKey) {
   )
 
   const byId = new Map(results.map((r) => [r.id, r]))
-  for (const card of cards) {
+  const enrichedCards = cards.map((card) => {
     const result = byId.get(card?.id)
-    if (!result) continue
-    // applyServedLimit already prefers a card's max_model_len over the table.
-    if (typeof result.context === "number" && result.context > 0) card.max_model_len = result.context
+    if (!result) return card
     if (typeof result.toolCall === "boolean") toolCalls.set(result.id, result.toolCall)
-  }
+    // applyServedLimit already prefers a card's max_model_len over the table.
+    if (typeof result.context === "number" && result.context > 0) {
+      return { ...card, max_model_len: result.context }
+    }
+    return card
+  })
 
   if (dirty) await writeCache(cache)
-  return toolCalls
+  return { cards: enrichedCards, toolCalls }
 }
 
 export const TanzuPlugin = async (input) => {
@@ -352,15 +365,18 @@ export const TanzuPlugin = async (input) => {
       } else {
         try {
           const cards = await discoverModels(creds.baseURL, creds.apiKey)
+          let enrichedCards = cards
           let probedToolCalls = new Map()
           try {
-            probedToolCalls = await enrichUnknownCards(cards, creds.baseURL, creds.apiKey)
+            const enrichment = await enrichUnknownCards(cards, creds.baseURL, creds.apiKey)
+            enrichedCards = enrichment.cards
+            probedToolCalls = enrichment.toolCalls
           } catch (err) {
             // Enrichment is an optimization. Losing it costs accuracy on
             // unknown models, never the provider itself.
             console.error(`[tanzu] capability probing failed: ${err.message}. Using bundled defaults.`)
           }
-          models = resolveModels(cards)
+          models = resolveModels(enrichedCards)
           // resolveModels' unknown-default assumes tool_call: true and takes no
           // per-card hint, so an observed `false` is applied here.
           for (const [id, toolCall] of probedToolCalls) {

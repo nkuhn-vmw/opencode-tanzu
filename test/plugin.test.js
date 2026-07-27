@@ -643,6 +643,56 @@ test("a cached probe result means no second probe on the next start", async () =
   )
 })
 
+// ---------------------------------------------------------------------------
+// IMPORTANT — cross-id probe concurrency. Every fixture above has exactly one
+// unknown id, so a regression from Promise.all fan-out (over ids) to a serial
+// `for` loop would pass every test above unnoticed. This one uses TWO unknown
+// ids and tracks, via a Set keyed by model id, how many DISTINCT ids have a
+// probe in flight at once. A same-id pair of probes (context + tool_call)
+// cannot push that count past 1 by itself — the Set dedupes the id — so the
+// count only exceeds 1 when two different ids are genuinely in flight
+// together, which is exactly what a serial per-id loop would never allow.
+// ---------------------------------------------------------------------------
+
+test("probes for different unknown ids run concurrently, not serially", async () => {
+  await withDataHome(() =>
+    withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
+      const cfg = {}
+      const h = await hooks()
+
+      const inFlightIds = new Set()
+      let maxConcurrentIds = 0
+
+      await withFetch(async (url, init) => {
+        if (String(url).endsWith("/models")) {
+          return jsonResponse({ data: [{ id: "acme/brand-new-9b" }, { id: "acme/second-9b" }] })
+        }
+        const body = JSON.parse(init.body)
+        const id = body.model
+        inFlightIds.add(id)
+        maxConcurrentIds = Math.max(maxConcurrentIds, inFlightIds.size)
+        // Yield a tick before resolving so overlapping in-flight probes have a
+        // chance to accumulate in the Set before any of them clear out of it.
+        // No sleep/timer involved — this is a single microtask tick, and the
+        // synchronous portion of Promise.all's fan-out (every callback runs up
+        // to its first await before the event loop drains any microtask) is
+        // what actually produces the overlap, not this delay.
+        await Promise.resolve()
+        inFlightIds.delete(id)
+        if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
+        return jsonResponse({ choices: [{ message: { content: "x" } }] })
+      }, () => h.config(cfg))
+
+      assert.ok(
+        maxConcurrentIds > 1,
+        `expected probes for different ids to overlap in flight, but max concurrent distinct ids was ${maxConcurrentIds}`,
+      )
+      assert.equal(cfg.provider.tanzu.models["acme/brand-new-9b"].limit.context, 262144)
+      assert.equal(cfg.provider.tanzu.models["acme/second-9b"].limit.context, 262144)
+    }),
+  )
+})
+
 test("a probed tool_call:false overrides the optimistic default", async () => {
   await withDataHome(() =>
     withEnv({ TANZU_GENAI_BASE_URL: BASE, TANZU_GENAI_API_KEY: "k" }, async () => {
