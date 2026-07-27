@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { discoverModels, DiscoveryError, probeContextLength } from "../src/opencode-tanzu-discovery.js"
+import { discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "../src/opencode-tanzu-discovery.js"
 
 const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/cdc-models.json", import.meta.url)))
 const BASE = "https://genai-proxy.example.test/inst/openai/v1"
@@ -135,4 +135,39 @@ test("probe posts the over-limit request with the bearer token", async () => {
   const body = JSON.parse(seenInit.body)
   assert.equal(body.model, "a/b")
   assert.equal(body.max_tokens, 999999999)
+})
+
+test("tool-call probe returns true when the model emits native tool_calls", async () => {
+  const body = {
+    choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ id: "1", function: { name: "ping" } }] } }],
+  }
+  assert.equal(await probeToolCall(BASE, "k", "a/b", { fetchImpl: stubFetch(200, body) }), true)
+})
+
+test("tool-call probe returns false when the model answers without tool_calls", async () => {
+  const body = { choices: [{ finish_reason: "stop", message: { content: "hello" } }] }
+  assert.equal(await probeToolCall(BASE, "k", "a/b", { fetchImpl: stubFetch(200, body) }), false)
+})
+
+test("tool-call probe returns null on an error response", async () => {
+  assert.equal(await probeToolCall(BASE, "k", "a/b", { fetchImpl: stubFetch(500, {}) }), null)
+})
+
+test("tool-call probe returns null on a network error rather than throwing", async () => {
+  const fetchImpl = async () => {
+    throw new Error("ECONNREFUSED")
+  }
+  assert.equal(await probeToolCall(BASE, "k", "a/b", { fetchImpl }), null)
+})
+
+test("tool-call probe sends a tool definition and a bounded max_tokens", async () => {
+  let seenBody
+  const fetchImpl = async (url, init) => {
+    seenBody = JSON.parse(init.body)
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "x" } }] }) }
+  }
+  await probeToolCall(BASE, "k", "a/b", { fetchImpl })
+  assert.equal(seenBody.tools.length, 1)
+  assert.equal(seenBody.tools[0].function.name, "ping")
+  assert.ok(seenBody.max_tokens <= 64, "probe must not generate a long reply")
 })

@@ -117,3 +117,61 @@ export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
   const context = Number.parseInt(match[1], 10)
   return Number.isFinite(context) && context > 0 ? context : null
 }
+
+/**
+ * Ask a model to call one trivial tool and see whether it answers with a native
+ * `tool_calls` payload. Used only for ids with no table row, where the
+ * alternative is assuming tool support and letting the agent discover otherwise
+ * mid-session.
+ *
+ * max_tokens is deliberately tiny: a backend that clamps instead of erroring
+ * (the ollama path) will actually generate here, and this must stay cheap.
+ *
+ * @returns {Promise<boolean | null>} true/false, or null when inconclusive
+ */
+export async function probeToolCall(baseURL, apiKey, id, opts = {}) {
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const timeoutMs = opts.timeoutMs ?? 8000
+  const url = `${baseURL.replace(/\/$/, "")}/chat/completions`
+
+  let res
+  try {
+    res = await fetchImpl(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: id,
+        messages: [{ role: "user", content: "Call the ping tool." }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "ping",
+              description: "Reply to a ping.",
+              parameters: { type: "object", properties: {}, required: [] },
+            },
+          },
+        ],
+        max_tokens: 64,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch {
+    return null
+  }
+
+  if (!res?.ok) return null
+
+  let body
+  try {
+    body = await res.json()
+  } catch {
+    return null
+  }
+
+  const choices = body?.choices
+  if (!Array.isArray(choices) || choices.length === 0) return null
+  const choice = choices[0]
+  const calls = choice?.message?.tool_calls
+  return (Array.isArray(calls) && calls.length > 0) || choice?.finish_reason === "tool_calls"
+}
