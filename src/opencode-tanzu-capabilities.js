@@ -132,12 +132,17 @@ export const TABLE = {
   // max_model_len over this table, so if the tile ever starts reporting these
   // ids' real served length, this row is automatically overridden.
   //
-  // tool_call: qwen3:14b VERIFIED 2026-07-27 — sent tool_choice: "required",
-  // got HTTP 200, finish_reason: "stop", with native tool_calls present.
-  // qwen3:30b-a3b is the same Qwen3 tool-calling family/template, so it is
-  // treated as verified by extension. gemma4:e4b and the Bonsai GGUF have NOT
-  // been verified either way — tool_call is left false for both rather than
-  // assumed true, consistent with not advertising anything unconfirmed.
+  // tool_call: ALL FOUR VERIFIED 2026-07-27 — each was sent a forced
+  // tool_choice: "required" request and each answered HTTP 200,
+  // finish_reason "stop", with a native tool_calls payload.
+  //
+  // gemma4:e4b and the Bonsai GGUF were briefly marked false here on the
+  // assumption that unverified should mean "don't advertise it". That is the
+  // wrong default for this field: a false tells opencode the model CANNOT use
+  // tools, so it stops offering them — actively disabling a capability the
+  // model has. "Unproven" and "absent" are different claims, and only a
+  // measurement settles which one applies. Measure before changing any of
+  // these; do not infer tool support from a model's family or size.
   "qwen3:14b": {
     kind: "chat",
     name: "Qwen3-14B (Tanzu)",
@@ -157,7 +162,7 @@ export const TABLE = {
   "gemma4:e4b": {
     kind: "chat",
     name: "Gemma-4-E4B (Tanzu)",
-    tool_call: false, // unverified — see comment above
+    tool_call: true,
     context: 4096,
     output: CONSERVATIVE_OUTPUT,
     modalities: { input: ["text"], output: ["text"] },
@@ -165,7 +170,7 @@ export const TABLE = {
   "hf.co/prism-ml/Bonsai-8B-gguf:Q1_0": {
     kind: "chat",
     name: "Bonsai-8B GGUF (Tanzu)",
-    tool_call: false, // unverified — see comment above
+    tool_call: true,
     context: 4096,
     output: CONSERVATIVE_OUTPUT,
     modalities: { input: ["text"], output: ["text"] },

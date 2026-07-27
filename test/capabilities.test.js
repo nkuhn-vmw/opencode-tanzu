@@ -62,6 +62,21 @@ test("Laguna-NVFP4 carries its served 262144 context, not the unknown-id default
 // i.e. silently truncated at ollama's num_ctx of 4096). Advertising 8192 here
 // let opencode pack a context ollama would then silently discard half of,
 // with no error surfaced anywhere.
+// REGRESSION: gemma4:e4b and the Bonsai GGUF were briefly shipped with
+// tool_call: false on the reasoning that unverified should mean "don't
+// advertise it". A false is not a neutral absence — it tells opencode the
+// model CANNOT use tools, so opencode stops offering them, disabling a
+// capability every one of these models demonstrably has. All four were sent a
+// forced tool_choice: "required" request on 2026-07-27 and all four returned a
+// native tool_calls payload.
+test("every ollama-served row advertises the tool calling it was measured to support", () => {
+  const ids = ["qwen3:14b", "qwen3:30b-a3b", "gemma4:e4b", "hf.co/prism-ml/Bonsai-8B-gguf:Q1_0"]
+  const out = resolveModels(ids.map((id) => ({ id })))
+  for (const id of ids) {
+    assert.equal(out[id].tool_call, true, `${id} must not be advertised as tool-incapable`)
+  }
+})
+
 test("qwen3:14b carries its served 4096 context, not the unknown-id default", () => {
   const out = resolveModels([{ id: "qwen3:14b" }])
   assert.equal(out["qwen3:14b"].limit.context, 4096)
