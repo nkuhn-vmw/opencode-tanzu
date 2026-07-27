@@ -822,10 +822,28 @@ test("probes for different unknown ids run concurrently, not serially", async ()
 // not — still comes back, so `resolveModels` still registers a model for
 // each one (unprobed ids simply keep the conservative default).
 //
-// This must fail if the `{ deadlineAt }` wiring into `mapWithConcurrency` (or
-// the guard inside it) is ever removed: with no deadline enforced, a worker
-// pool just keeps picking up items until the roster is exhausted, so ALL
-// ids would end up probed regardless of how tiny `budgetMs` is.
+// This must fail if the `{ deadlineAt }`/`now` wiring into
+// `mapWithConcurrency` (or the guard inside it) is ever removed: with no
+// deadline enforced, a worker pool just keeps picking up items until the
+// roster is exhausted, so ALL ids would end up probed regardless of how the
+// clock behaves.
+//
+// Wave 6: this used to race a real 1ms `budgetMs` against a `setTimeout(30)`
+// in the stubbed fetch, gambling that the worker pool's synchronous startup
+// (checking the deadline, taking an item, invoking `fn`) always beat 1ms of
+// REAL wall-clock time. Under the parallel load of the full suite it did
+// not, always — occasionally the synchronous stretch itself took >1ms,
+// tripping the deadline mid-startup and starting only 4 or 5 of the 6
+// workers instead of all 6 (flaky ~1/3 of full-suite runs). `enrichUnknownCards`
+// and `mapWithConcurrency` now take an injectable `now` (defaulting to
+// `Date.now`, so production behavior is unchanged) purely so a test can
+// swap in a deterministic clock instead of racing the real one. Here `now`
+// reports "not expired" for as long as fewer than PROBE_CONCURRENCY_LIMIT
+// distinct ids have started a probe, and "expired" forever after — tied
+// directly to the invariant under test (not to a wall-clock reading, and
+// not to counting how many times the clock happens to get called), so the
+// outcome no longer depends on how fast this machine executes synchronous
+// JS under load.
 // ---------------------------------------------------------------------------
 
 test("enrichUnknownCards stops starting new probes once its budget elapses, but still returns every card", async () => {
@@ -837,19 +855,19 @@ test("enrichUnknownCards stops starting new probes once its budget elapses, but 
     const impl = async (url, init) => {
       const body = JSON.parse(init.body)
       probedIds.add(body.model)
-      // Slow enough that the tiny budget below expires before a worker loops
-      // back for a second item, but no test relies on wall-clock precision
-      // beyond "some delay, then respond".
-      await new Promise((resolve) => setTimeout(resolve, 30))
       if (body.max_tokens === 999999999) return jsonResponse(OVER_LIMIT_400, 400)
       return jsonResponse({ choices: [{ finish_reason: "stop", message: { content: "x" } }] })
     }
 
-    const { cards: enriched } = await withFetch(impl, () =>
-      // budgetMs=1: expired before any worker's second iteration, so only the
-      // first PROBE_CONCURRENCY_LIMIT ids picked up synchronously get probed.
-      enrichUnknownCards(cards, BASE, "k", 1),
-    )
+    // Deterministic fake clock — see the comment block above. `budgetMs` can
+    // be any positive number: `now()` returns 0 while under the threshold,
+    // so `enrichUnknownCards` computes `deadlineAt = 0 + budgetMs`; once the
+    // threshold is crossed `now()` returns `budgetMs` itself, which trips the
+    // `now() >= deadlineAt` guard on every check from then on.
+    const budgetMs = 1
+    const now = () => (probedIds.size < PROBE_CONCURRENCY_LIMIT ? 0 : budgetMs)
+
+    const { cards: enriched } = await withFetch(impl, () => enrichUnknownCards(cards, BASE, "k", budgetMs, now))
 
     assert.equal(
       probedIds.size,

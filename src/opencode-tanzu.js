@@ -171,24 +171,29 @@ export const PROBE_PHASE_BUDGET_MS = 40_000
  * @param {T[]} items
  * @param {number} limit
  * @param {(item: T) => Promise<R>} fn
- * @param {{deadlineAt?: number}} [opts] when `deadlineAt` (a `Date.now()`-style
- *   epoch ms) is given, a worker stops picking up NEW items once the clock
- *   passes it — an item already in flight still runs to completion (it has
- *   its own request-level timeout already), so this only bounds how many
- *   items a worker STARTS, not how long an individual call can take. Items
- *   never started this way leave a `undefined` hole in the returned array at
- *   their index; callers must treat a hole exactly like "not attempted this
- *   run", the same as any id excluded by `PROBE_ID_CAP`.
+ * @param {{deadlineAt?: number, now?: () => number}} [opts] when `deadlineAt`
+ *   (an epoch ms in the same units `now()` returns) is given, a worker stops
+ *   picking up NEW items once the clock passes it — an item already in
+ *   flight still runs to completion (it has its own request-level timeout
+ *   already), so this only bounds how many items a worker STARTS, not how
+ *   long an individual call can take. Items never started this way leave a
+ *   `undefined` hole in the returned array at their index; callers must
+ *   treat a hole exactly like "not attempted this run", the same as any id
+ *   excluded by `PROBE_ID_CAP`. `now` defaults to `Date.now` and exists so
+ *   tests can replace the wall clock with a deterministic one — see
+ *   `enrichUnknownCards`'s `now` param and `test/plugin.test.js`'s
+ *   budget-enforcement test, which fails if this guard (or the `deadlineAt`
+ *   wiring feeding it) is removed.
  * @returns {Promise<R[]>} results in the same order as `items`, `undefined`
  *   at indices abandoned to the deadline
  */
 export async function mapWithConcurrency(items, limit, fn, opts = {}) {
-  const { deadlineAt } = opts
+  const { deadlineAt, now = Date.now } = opts
   const results = new Array(items.length)
   let next = 0
   async function worker() {
     for (;;) {
-      if (deadlineAt !== undefined && Date.now() >= deadlineAt) return
+      if (deadlineAt !== undefined && now() >= deadlineAt) return
       const i = next++
       if (i >= items.length) return
       results[i] = await fn(items[i], i)
@@ -421,13 +426,19 @@ function toolCallOutcome(raw) {
  *
  * @param {number} [budgetMs] overrides `PROBE_PHASE_BUDGET_MS` for the probe
  *   phase's wall-clock budget. Defaults to the constant; exists so tests can
- *   exercise the deadline without a real 40-second wait — see
+ *   exercise the deadline without a real 40-second wait.
+ * @param {() => number} [now] clock used both to compute the deadline
+ *   (`now() + budgetMs`) and, threaded through to `mapWithConcurrency`, to
+ *   evaluate it. Defaults to `Date.now`. Exists so a test can replace the
+ *   real wall clock with a deterministic one instead of racing a tiny
+ *   `budgetMs` against real elapsed time — see
  *   `test/plugin.test.js`'s budget-enforcement test, which fails if this
- *   value (or the `{ deadlineAt }` it feeds `mapWithConcurrency`) is removed.
+ *   value (or the `{ deadlineAt }`/`now` wiring it feeds
+ *   `mapWithConcurrency`) is removed.
  * @returns {Promise<{cards: {id: string, max_model_len?: number|null}[], toolCalls: Map<string, boolean>}>}
  *   the enriched cards and the probed tool_call verdicts by id
  */
-export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROBE_PHASE_BUDGET_MS) {
+export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROBE_PHASE_BUDGET_MS, now = Date.now) {
   const unknown = unknownChatIds(cards)
   const toolCalls = new Map()
   if (unknown.length === 0) return { cards, toolCalls }
@@ -461,7 +472,7 @@ export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROB
     )
   }
 
-  const deadlineAt = Date.now() + budgetMs
+  const deadlineAt = now() + budgetMs
   const rawProbedResults = await mapWithConcurrency(
     idsToProbe,
     PROBE_CONCURRENCY_LIMIT,
@@ -480,7 +491,7 @@ export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROB
       dirty = true
       return { id, context: context.value, toolCall: toolCall.value }
     },
-    { deadlineAt },
+    { deadlineAt, now },
   )
 
   // A hole means a worker stopped picking up new ids once PROBE_PHASE_BUDGET_MS
