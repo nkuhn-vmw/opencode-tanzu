@@ -144,12 +144,15 @@ therefore **bundled** with the plugin, hand-sourced from each model's card and `
 - A discovered id **not** in the table still appears, named **`<id> (Tanzu, unverified)`**, with a
   conservative **8192**-token context and 4096-token output. It works; it is just not tuned.
   PRs adding verified entries to `src/opencode-tanzu-capabilities.js` are welcome.
-- **Unknown ids are probed for their real context window.** The tile strips
-  `max_model_len` from `/v1/models`, but vLLM reveals it when asked for an
-  impossible `max_tokens`, so the plugin issues one cheap request per unknown
-  model and uses the answer. Results (including "could not determine") are
-  cached for a week under `$XDG_DATA_HOME/opencode/opencode-tanzu/discovery-cache.json`,
-  so a steady-state start makes no extra requests. Models served through the
+- **Unknown ids are probed for their real context window and tool-call
+  support.** The tile strips `max_model_len` from `/v1/models`, but vLLM
+  reveals it when asked for an impossible `max_tokens`, so the plugin fires
+  two cheap requests per unknown model — one for context length, one for
+  tool-call support, concurrently — and uses the answers. Results (including
+  "could not determine") are cached for a week under
+  `$XDG_DATA_HOME/opencode/opencode-tanzu/discovery-cache.json` (else
+  `~/.local/share/opencode/opencode-tanzu/discovery-cache.json`), so a
+  steady-state start makes no extra requests. Models served through the
   tile's ollama backend (colon-tag ids like `qwen3:14b`) clamp instead of
   erroring and cannot be probed — they keep the conservative defaults.
 - If the tile ever stops stripping `max_model_len`, a served context limit overrides the bundled
@@ -181,21 +184,27 @@ serving hardware changes — `poolside/Laguna-S-2.1-INT4` became
 the tile does not report `max_model_len`, a new id has no known context window.
 
 The plugin now probes for it automatically, so in most cases there is nothing to
-do. To check a foundation for models the bundled table does not cover:
+do. To check a foundation for models the bundled table does not cover, run this
+from a clone of the repo (`npm run drift` is a repo script — it is not one of
+the four files a Homebrew install copies, so it is unreachable from a
+`brew install` setup):
 
 ```bash
+git clone https://github.com/nkuhn-vmw/opencode-tanzu.git && cd opencode-tanzu
 export TANZU_GENAI_BASE_URL="https://genai-proxy.sys.<foundation>/<instance>/openai/v1"
 export TANZU_GENAI_API_KEY="…"     # from `cf service-key <instance> <key>`
 npm run drift -- --probe
 ```
 
 To read one model's served limit by hand, ask for an impossible `max_tokens` —
-the error carries the real number:
+the response body's error message carries the real number:
 
 ```bash
 curl -s -H "Authorization: Bearer $TANZU_GENAI_API_KEY" -H "Content-Type: application/json" \
   "$TANZU_GENAI_BASE_URL/chat/completions" \
   -d '{"model":"<model-id>","messages":[{"role":"user","content":"hi"}],"max_tokens":999999999}'
+# The response is a JSON error body, e.g. {"error":{"message":"...","type":"..."}};
+# the line below is just the extracted "message" text, not the raw response:
 # → max_tokens=999999999 cannot be greater than max_model_len=max_total_tokens=262144
 ```
 
@@ -215,18 +224,27 @@ provider actually registered:
 npm run drift -- --probe
 ```
 
+(`npm run drift` is a repo script, so this needs a clone —
+`git clone https://github.com/nkuhn-vmw/opencode-tanzu.git && cd opencode-tanzu`
+— not a Homebrew install; see [When the tile swaps a model](#when-the-tile-swaps-a-model).)
+
 If the model shows up under DRIFT with a probed context, upgrade the plugin
 (`brew upgrade nkuhn-vmw/tap/opencode-tanzu && opencode-tanzu-install`, or
 `git pull && ./install.sh`) and restart opencode — the plugin's model list is
-built at startup. If the probe cannot determine it, pin the limit yourself with
-a `models` override in `~/.config/opencode/opencode.json` (this is a plain
-value, not the `{file:}` indirection that breaks startup):
+built at startup.
 
-```json
-{ "provider": { "tanzu": { "models": {
-  "<model-id>": { "limit": { "context": 262144, "output": 32768 } }
-} } } }
-```
+If the probe cannot determine it, a hand-written `models` override in
+`~/.config/opencode/opencode.json` will **not** help — see
+[Caveat: a hand-pinned roster will be replaced](#caveat-a-hand-pinned-roster-will-be-replaced):
+the config hook overwrites `provider.tanzu.models` unconditionally on every
+start, plugin installed or not. Two options that actually work instead:
+
+- Add a row for the model to `src/opencode-tanzu-capabilities.js` (a context
+  window, an output limit, `tool_call`) and reinstall — this is the same file
+  the bundled table and the drift script both read.
+- Drop the plugin and use the
+  [config-only fallback](#no-plugin-at-all-the-config-only-fallback): with no
+  `tanzu` plugin installed, nothing overwrites a hand-pinned `models` block.
 
 **`401` / "The foundation rejected the API key"**
 The bearer token is an ephemeral JWT and expires. Fetch a fresh one from your service key
