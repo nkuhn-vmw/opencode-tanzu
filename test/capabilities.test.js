@@ -55,6 +55,38 @@ test("Laguna-NVFP4 carries its served 262144 context, not the unknown-id default
   assert.ok(!/unverified/i.test(out[LAGUNA].name))
 })
 
+// REGRESSION: these four ollama-style CDC ids clamp max_tokens instead of
+// erroring, so the startup probe can't read their real window and they used
+// to fall back to CONSERVATIVE_CONTEXT (8192) — double what the tile actually
+// serves (measured live: a ~40k-token prompt returns prompt_tokens ~4098/4099,
+// i.e. silently truncated at ollama's num_ctx of 4096). Advertising 8192 here
+// let opencode pack a context ollama would then silently discard half of,
+// with no error surfaced anywhere.
+test("qwen3:14b carries its served 4096 context, not the unknown-id default", () => {
+  const out = resolveModels([{ id: "qwen3:14b" }])
+  assert.equal(out["qwen3:14b"].limit.context, 4096)
+  assert.ok(!/unverified/i.test(out["qwen3:14b"].name))
+})
+
+test("qwen3:30b-a3b carries its served 4096 context, not the unknown-id default", () => {
+  const out = resolveModels([{ id: "qwen3:30b-a3b" }])
+  assert.equal(out["qwen3:30b-a3b"].limit.context, 4096)
+  assert.ok(!/unverified/i.test(out["qwen3:30b-a3b"].name))
+})
+
+test("gemma4:e4b carries its served 4096 context, not the unknown-id default", () => {
+  const out = resolveModels([{ id: "gemma4:e4b" }])
+  assert.equal(out["gemma4:e4b"].limit.context, 4096)
+  assert.ok(!/unverified/i.test(out["gemma4:e4b"].name))
+})
+
+test("Bonsai GGUF carries its served 4096 context, not the unknown-id default", () => {
+  const BONSAI = "hf.co/prism-ml/Bonsai-8B-gguf:Q1_0"
+  const out = resolveModels([{ id: BONSAI }])
+  assert.equal(out[BONSAI].limit.context, 4096)
+  assert.ok(!/unverified/i.test(out[BONSAI].name))
+})
+
 test("unknown chat model is included with conservative defaults and marked unverified", () => {
   const out = resolveModels([{ id: "acme/mystery-7b" }])
   assert.equal(out["acme/mystery-7b"].limit.context, CONSERVATIVE_CONTEXT)

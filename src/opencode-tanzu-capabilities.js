@@ -109,6 +109,67 @@ export const TABLE = {
     name: "Nomic Embed v2 MoE",
     context: 512,
   },
+  // Four ollama-style CDC ids that clamp max_tokens instead of erroring, so the
+  // startup probe cannot read their real window and they were falling back to
+  // the 8192 CONSERVATIVE_CONTEXT — double their real capacity. Measured live
+  // 2026-07-27 by sending a ~40k-token prompt and reading the response's
+  // usage.prompt_tokens: all four returned ~4098/4099, i.e. silently truncated
+  // the input at ollama's default num_ctx of 4096 (confirmed not an artifact —
+  // a ~6k-token prompt to qwen3:14b came back with prompt_tokens: 3016,
+  // accepted in full). We advertise 4096, not the observed 4098/4099: the
+  // small excess is chat-template overhead counted into prompt_tokens, and
+  // under-advertising is safe (the agent just compacts a little early) while
+  // over-advertising recreates exactly the silent-truncation bug this row
+  // exists to fix.
+  //
+  // IMPORTANT: 4096 is ollama's *serving* configuration (num_ctx) on this
+  // tile, NOT these models' architectural context maximum — qwen3-14b's own
+  // model card claims a far larger window. If the platform team ever raises
+  // num_ctx on the backend, these rows become wrong only in the safe
+  // direction (under-advertised) until updated; do not "correct" this number
+  // upward from a spec sheet without re-measuring what the tile actually
+  // serves. Also note applyServedLimit() above already prefers a tile-reported
+  // max_model_len over this table, so if the tile ever starts reporting these
+  // ids' real served length, this row is automatically overridden.
+  //
+  // tool_call: qwen3:14b VERIFIED 2026-07-27 — sent tool_choice: "required",
+  // got HTTP 200, finish_reason: "stop", with native tool_calls present.
+  // qwen3:30b-a3b is the same Qwen3 tool-calling family/template, so it is
+  // treated as verified by extension. gemma4:e4b and the Bonsai GGUF have NOT
+  // been verified either way — tool_call is left false for both rather than
+  // assumed true, consistent with not advertising anything unconfirmed.
+  "qwen3:14b": {
+    kind: "chat",
+    name: "Qwen3-14B (Tanzu)",
+    tool_call: true,
+    context: 4096,
+    output: CONSERVATIVE_OUTPUT,
+    modalities: { input: ["text"], output: ["text"] },
+  },
+  "qwen3:30b-a3b": {
+    kind: "chat",
+    name: "Qwen3-30B-A3B (Tanzu)",
+    tool_call: true,
+    context: 4096,
+    output: CONSERVATIVE_OUTPUT,
+    modalities: { input: ["text"], output: ["text"] },
+  },
+  "gemma4:e4b": {
+    kind: "chat",
+    name: "Gemma-4-E4B (Tanzu)",
+    tool_call: false, // unverified — see comment above
+    context: 4096,
+    output: CONSERVATIVE_OUTPUT,
+    modalities: { input: ["text"], output: ["text"] },
+  },
+  "hf.co/prism-ml/Bonsai-8B-gguf:Q1_0": {
+    kind: "chat",
+    name: "Bonsai-8B GGUF (Tanzu)",
+    tool_call: false, // unverified — see comment above
+    context: 4096,
+    output: CONSERVATIVE_OUTPUT,
+    modalities: { input: ["text"], output: ["text"] },
+  },
 }
 
 function clampOutput(context, output) {

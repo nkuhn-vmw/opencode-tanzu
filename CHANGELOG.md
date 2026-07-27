@@ -3,6 +3,24 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-07-27
+
+### Fixed
+- Four ollama-style CDC models (`qwen3:14b`, `qwen3:30b-a3b`, `gemma4:e4b`,
+  `hf.co/prism-ml/Bonsai-8B-gguf:Q1_0`) clamp `max_tokens` instead of erroring,
+  so the startup probe can't read their real window and they were resolving
+  to `CONSERVATIVE_CONTEXT` (8192) — double their real capacity. Measured live
+  by sending a ~40,000-token prompt and reading `usage.prompt_tokens` back:
+  all four silently truncated the input to ~4096 tokens (ollama's default
+  `num_ctx`), with no error surfaced anywhere. Advertising 8192 let opencode
+  pack a context that ollama then silently discarded half of — strictly worse
+  than the compaction-loop problem this project exists to fix, since nothing
+  told the agent it had lost context. Added table rows advertising the
+  measured-safe 4096 for all four. `qwen3:14b`'s native tool-calling was
+  verified live and `qwen3:30b-a3b` is treated as verified by extension (same
+  Qwen3 family/template); `gemma4:e4b` and the Bonsai GGUF are unverified and
+  ship with `tool_call: false` rather than an unconfirmed assumption.
+
 ## [0.2.0] — 2026-07-27
 
 ### Added
