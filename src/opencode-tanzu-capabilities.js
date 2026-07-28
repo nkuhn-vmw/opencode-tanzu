@@ -259,3 +259,17 @@ export function unknownChatIds(cards) {
   }
   return out
 }
+
+// opencode loads EVERY .js file in its plugin directory and calls each one's
+// default export as a plugin factory. This file is a helper module of
+// opencode-tanzu.js, not a plugin — but it has to live in the same flat
+// directory, because opencode does not scan subdirectories and the
+// `opencode-tanzu-` prefix is what keeps these names collision-safe next to
+// other people's plugins.
+//
+// Without this no-op, opencode logs `failed to load plugin ... "Plugin export
+// is not a function"` for this file on every single startup. Nothing breaks —
+// the real plugin still registers and inference works — but three ERROR lines
+// per launch is indistinguishable from a real failure to anyone reading the
+// log, and it has already been reported as one.
+export default async () => ({})

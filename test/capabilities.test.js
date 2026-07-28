@@ -186,3 +186,30 @@ test("unknownChatIds skips malformed cards and dedupes", () => {
 test("unknownChatIds on an empty roster is empty", () => {
   assert.deepEqual(unknownChatIds([]), [])
 })
+
+// REGRESSION: opencode loads EVERY .js in its plugin dir and calls the default
+// export as a plugin factory. These helper modules must live in that same flat
+// directory (opencode does not scan subdirectories), so each needs a no-op
+// default export or opencode logs `failed to load plugin ... "Plugin export is
+// not a function"` on every startup. Nothing breaks without it — but three
+// ERROR lines per launch read exactly like a real outage, and were in fact
+// reported as one.
+test("every installed module has a loadable default export", async () => {
+  // The main plugin uses opencode's { id, server } object shape; the helper
+  // modules use a no-op factory function. opencode accepts either — what it
+  // rejects is an UNDEFINED default, which is what produced the original
+  // "Plugin export is not a function" errors.
+  const mod = await import("../src/opencode-tanzu.js")
+  assert.equal(typeof mod.default, "object", "the plugin keeps its { id, server } shape")
+  assert.equal(typeof mod.default.server, "function", "and its server must be the plugin factory")
+
+  for (const file of [
+    "../src/opencode-tanzu-cache.js",
+    "../src/opencode-tanzu-capabilities.js",
+    "../src/opencode-tanzu-discovery.js",
+  ]) {
+    const helper = await import(file)
+    assert.equal(typeof helper.default, "function", `${file} must default-export a no-op factory`)
+    assert.equal(typeof (await helper.default({})), "object", `${file}'s factory must return hooks`)
+  }
+})
