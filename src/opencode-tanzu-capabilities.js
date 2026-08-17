@@ -175,7 +175,55 @@ export const TABLE = {
     output: CONSERVATIVE_OUTPUT,
     modalities: { input: ["text"], output: ["text"] },
   },
+  // Served on NDC at max_model_len 262144 (verified on the worker's vLLM 0.25.1
+  // config 2026-08-14; the tile strips the field). Tool calling verified in
+  // agentic use. Text-only. `options` are load-bearing, not preference:
+  // temperature/topP are DeepSeek's official agentic recommendation for the
+  // 0731 variant (recipes.vllm.ai), and frequencyPenalty 0.5 is the measured
+  // fix for the V4-family long-context narration loop — at temp 0 with ~20
+  // identical "Let me X" turns in history the model loops deterministically
+  // (5/5); frequencyPenalty 0.5 breaks the trap 5/5 even at temp 0
+  // (reproduced on the NDC worker 2026-08-17, ndc-ops PLAN doc).
+  "deepseek-ai/DeepSeek-V4-Flash-0731": {
+    kind: "chat",
+    name: "DeepSeek-V4-Flash (Tanzu)",
+    tool_call: true,
+    context: 262144,
+    output: 32768,
+    modalities: { input: ["text"], output: ["text"] },
+    options: { temperature: 1.0, topP: 0.95, frequencyPenalty: 0.5 },
+  },
+  // Served on NDC at max_model_len 262144 (verified 2026-08-14). Multimodal:
+  // image + video input validated end-to-end on the worker (direct file URLs /
+  // base64 — NOT YouTube page links). Thinking model; the NDC tile serves a
+  // custom chat template defaulting reasoning to medium with in-band switches
+  // (/no_think /think_low /think_medium /think_hard) usable in any user
+  // message. Sampling per the model card's thinking-mode recommendation —
+  // at temperature 0 thinking models can stall in the think phase.
+  "Qwen/Qwen3.8-27B-FP8": {
+    kind: "chat",
+    name: "Qwen3.8-27B (Tanzu)",
+    tool_call: true,
+    context: 262144,
+    output: 32768,
+    modalities: { input: ["text", "image", "video"], output: ["text"] },
+    options: { temperature: 1.0, topP: 0.95 },
+  },
 }
+
+/**
+ * Family fallbacks for roster ids with no TABLE row yet. The tile's /v1/models
+ * strips everything but the id, so true dynamic discovery of sampling params is
+ * impossible — the honest middle ground is: recognize the family from the id
+ * and apply that family's known-safe sampling while keeping the conservative
+ * context until a verified row is added. Order matters; first match wins.
+ */
+const FAMILY_OPTIONS = [
+  // Anti-loop insurance for the whole DeepSeek-V4 family (see the 0731 row).
+  { match: /deepseek/i, options: { temperature: 1.0, topP: 0.95, frequencyPenalty: 0.5 } },
+  // Qwen3.5+ thinking models misbehave at temp 0 (think-phase stalls).
+  { match: /qwen/i, options: { temperature: 1.0, topP: 0.95 } },
+]
 
 function clampOutput(context, output) {
   return Math.max(1, Math.min(output, Math.floor(context / 2)))
@@ -188,7 +236,13 @@ function fromTable(entry) {
     tool_call: entry.tool_call === true,
     limit: { context, output: clampOutput(context, entry.output) },
     ...(entry.modalities ? { modalities: entry.modalities } : {}),
+    ...(entry.options ? { options: entry.options } : {}),
   }
+}
+
+function familyOptions(id) {
+  const hit = FAMILY_OPTIONS.find((f) => f.match.test(id))
+  return hit ? { options: hit.options } : {}
 }
 
 function unknownDefaults(id) {
@@ -196,6 +250,7 @@ function unknownDefaults(id) {
     name: `${id} (Tanzu, unverified)`,
     tool_call: true,
     limit: { context: CONSERVATIVE_CONTEXT, output: CONSERVATIVE_OUTPUT },
+    ...familyOptions(id),
   }
 }
 

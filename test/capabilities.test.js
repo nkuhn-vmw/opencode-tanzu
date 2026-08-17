@@ -213,3 +213,40 @@ test("every installed module has a loadable default export", async () => {
     assert.equal(typeof (await helper.default({})), "object", `${file}'s factory must return hooks`)
   }
 })
+
+// REGRESSION: DeepSeek-V4-Flash on NDC ran as an unknown id (8192-context
+// default -> nonstop compaction) AND without the anti-loop sampling params.
+// The V4 family deterministically loops narration ("Let me X" x N, no tool
+// call) at temp 0 once history is primed; frequencyPenalty 0.5 breaks the
+// trap 5/5 even at temp 0 (measured on the NDC worker, 2026-08-17).
+test("DeepSeek-V4-Flash carries served context and anti-loop sampling options", () => {
+  const DS = "deepseek-ai/DeepSeek-V4-Flash-0731"
+  const out = resolveModels([{ id: DS }])
+  assert.equal(out[DS].limit.context, 262144)
+  assert.equal(out[DS].tool_call, true)
+  assert.ok(!/unverified/i.test(out[DS].name))
+  assert.deepEqual(out[DS].options, { temperature: 1.0, topP: 0.95, frequencyPenalty: 0.5 })
+})
+
+test("Qwen3.8-27B-FP8 carries served context, multimodal input, and thinking-safe sampling", () => {
+  const Q = "Qwen/Qwen3.8-27B-FP8"
+  const out = resolveModels([{ id: Q }])
+  assert.equal(out[Q].limit.context, 262144)
+  assert.deepEqual(out[Q].modalities.input, ["text", "image", "video"])
+  assert.deepEqual(out[Q].options, { temperature: 1.0, topP: 0.95 })
+})
+
+// Family fallback: a FUTURE deepseek id with no table row must still get the
+// anti-loop sampling (with the conservative context) instead of nothing.
+test("unknown deepseek ids inherit family anti-loop options", () => {
+  const FUTURE = "deepseek-ai/DeepSeek-V5-Hypothetical"
+  const out = resolveModels([{ id: FUTURE }])
+  assert.equal(out[FUTURE].limit.context, CONSERVATIVE_CONTEXT)
+  assert.equal(out[FUTURE].options.frequencyPenalty, 0.5)
+  assert.ok(/unverified/i.test(out[FUTURE].name))
+})
+
+test("unknown non-family ids carry no options", () => {
+  const out = resolveModels([{ id: "acme/some-model" }])
+  assert.equal(out["acme/some-model"].options, undefined)
+})
