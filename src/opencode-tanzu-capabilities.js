@@ -231,11 +231,19 @@ function clampOutput(context, output) {
 
 function fromTable(entry) {
   const context = entry.context
+  // opencode's attach-a-file gate keys on the `attachment` boolean (models.dev
+  // convention: multimodal models carry BOTH attachment: true and modalities).
+  // Without it, opencode refuses pasted images client-side — "This model
+  // doesn't support image input" — even for models whose image path is
+  // verified end-to-end on the worker. Derive it from the modalities we
+  // already assert rather than maintaining a second hand-set flag.
+  const multimodal = entry.modalities?.input?.some((m) => m !== "text") === true
   return {
     name: entry.name,
     tool_call: entry.tool_call === true,
     limit: { context, output: clampOutput(context, entry.output) },
     ...(entry.modalities ? { modalities: entry.modalities } : {}),
+    ...(multimodal ? { attachment: true } : {}),
     ...(entry.options ? { options: entry.options } : {}),
   }
 }

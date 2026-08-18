@@ -250,3 +250,14 @@ test("unknown non-family ids carry no options", () => {
   const out = resolveModels([{ id: "acme/some-model" }])
   assert.equal(out["acme/some-model"].options, undefined)
 })
+
+// REGRESSION: opencode gates pasted images on the `attachment` boolean, not
+// modalities — a multimodal row without it gets "This model doesn't support
+// image input" client-side (seen live with Qwen3.8 on NDC, 2026-08-18).
+test("multimodal rows derive attachment: true; text-only rows do not", () => {
+  const Q = "Qwen/Qwen3.8-27B-FP8"
+  const DS = "deepseek-ai/DeepSeek-V4-Flash-0731"
+  const out = resolveModels([{ id: Q }, { id: DS }])
+  assert.equal(out[Q].attachment, true)
+  assert.equal(out[DS].attachment, undefined)
+})
