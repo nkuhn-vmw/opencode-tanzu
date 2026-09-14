@@ -21,7 +21,6 @@ If current Homebrew reports an untrusted community tap, review the
 `brew trust --tap nkuhn-vmw/tap`, then retry. This trusts formula code from
 that tap.
 
-
 Create the token file from the service key supplied by your platform operator;
 use a private directory (0700) and a file readable only by you (0600). Do not
 commit the token or paste it into a command argument. The URL is the key's
@@ -41,7 +40,7 @@ file fails the operation; no credentials are printed or generated into config.
 Install the V2 executable separately. If yours is not named `opencode2`:
 
 ```bash
-export OPENCODE_V2_BIN='/absolute/path/to/opencode2'
+export OPENCODE_V2_BIN='/absolute/path/to/v2/opencode'
 opencode-tanzu-v2 --version
 ```
 
