@@ -19,7 +19,7 @@
 ## Live foundation result and limits
 
 An existing authorized Tanzu endpoint returned HTTP 200 and a live chat-model
-roster. Two minimal OpenCode inference attempts, using GPT-OSS 20B and Gemma
+roster. Three minimal OpenCode inference attempts, using GPT-OSS 20B and Gemma
 E4B, exceeded the 120-second test timeout. **Live end-to-end inference was not
 proven.** The successful fixture tests establish native runtime/adapter/stream
 compatibility, not live model quality, latency or tool execution.

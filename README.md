@@ -48,6 +48,12 @@ brew install nkuhn-vmw/tap/opencode-tanzu
 opencode-tanzu-install
 ```
 
+If current Homebrew reports an untrusted community tap, review the
+[tap repository](https://github.com/nkuhn-vmw/homebrew-tap), run
+`brew trust --tap nkuhn-vmw/tap`, then retry. This trusts formula code from
+that tap.
+
+
 Or from a clone:
 
 ```bash

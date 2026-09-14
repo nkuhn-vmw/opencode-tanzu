@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
 # Install (or uninstall) the opencode-tanzu plugin by copying its source files
-# into opencode's global plugin directory, where opencode auto-loads every
-# .js file at startup. No npm, no network, no dependencies — the four files
-# in src/ are the entire plugin.
+# into the selected runtime's plugin directory. V1 uses four flat modules;
+# V2 uses a native plugin directory and an isolated launcher. No npm,
+# network download or build step is required.
 #
-#   ./install.sh              install / update (idempotent)
+#   ./install.sh              V1 install / update (idempotent)
+#   ./install.sh --runtime v2  native V2 install / update
 #   ./install.sh --uninstall  remove the plugin files
 #   ./install.sh --project    install into ./.opencode/plugins of the CWD
 #                             instead of the global plugin directory

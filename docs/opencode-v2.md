@@ -16,6 +16,12 @@ export TANZU_GENAI_API_KEY_FILE="$HOME/.config/tanzu/api-key"
 opencode-tanzu-v2
 ```
 
+If current Homebrew reports an untrusted community tap, review the
+[tap repository](https://github.com/nkuhn-vmw/homebrew-tap), run
+`brew trust --tap nkuhn-vmw/tap`, then retry. This trusts formula code from
+that tap.
+
+
 Create the token file from the service key supplied by your platform operator;
 use a private directory (0700) and a file readable only by you (0600). Do not
 commit the token or paste it into a command argument. The URL is the key's
