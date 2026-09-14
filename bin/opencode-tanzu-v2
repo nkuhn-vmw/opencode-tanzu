@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Launch a separately installed V2/beta runtime with isolated config and state.
+set -euo pipefail
+export XDG_CONFIG_HOME="${OPENCODE_TANZU_V2_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode-tanzu-v2}"
+export XDG_DATA_HOME="${OPENCODE_TANZU_V2_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-tanzu-v2}"
+export XDG_CACHE_HOME="${OPENCODE_TANZU_V2_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/opencode-tanzu-v2}"
+export XDG_STATE_HOME="${OPENCODE_TANZU_V2_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-tanzu-v2}"
+exec "${OPENCODE_V2_BIN:-opencode2}" "$@"

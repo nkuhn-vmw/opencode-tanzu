@@ -438,8 +438,8 @@ function toolCallOutcome(raw) {
  * @returns {Promise<{cards: {id: string, max_model_len?: number|null}[], toolCalls: Map<string, boolean>}>}
  *   the enriched cards and the probed tool_call verdicts by id
  */
-export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROBE_PHASE_BUDGET_MS, now = Date.now) {
-  const unknown = unknownChatIds(cards)
+export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROBE_PHASE_BUDGET_MS, now = Date.now, probeKnown = false) {
+  const unknown = probeKnown ? [...new Set(cards.map((card) => card?.id).filter((id) => typeof id === "string" && !/embed|rerank/i.test(id)))] : unknownChatIds(cards)
   const toolCalls = new Map()
   if (unknown.length === 0) return { cards, toolCalls }
 

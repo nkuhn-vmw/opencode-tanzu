@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Add a standalone native OpenCode V2/beta provider, catalog refresh, conservative served-limit discovery and beta prompt-cache compatibility.
+- Add `--runtime v1|v2` installation and the isolated `opencode-tanzu-v2` launcher; retain V1 as the installer default.
+- Keep foundation keys in a streaming, authenticated loopback forwarder that rejects redirects and preserves operator headers.
+- Read V2 token files on each inference/refresh and reject redirects during discovery/probing.
+- Share the installer with Homebrew and document V1/V2 setup, upgrades and troubleshooting.
+
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 

@@ -38,6 +38,7 @@ export async function discoverModels(baseURL, apiKey, opts = {}) {
   let res
   try {
     res = await fetchImpl(url, {
+      redirect: "error",
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(timeoutMs),
     })
@@ -130,6 +131,7 @@ export async function probeContextLength(baseURL, apiKey, id, opts = {}) {
   try {
     res = await fetchImpl(url, {
       method: "POST",
+      redirect: "error",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: id,
@@ -239,6 +241,7 @@ export async function probeToolCall(baseURL, apiKey, id, opts = {}) {
   try {
     res = await fetchImpl(url, {
       method: "POST",
+      redirect: "error",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: id,

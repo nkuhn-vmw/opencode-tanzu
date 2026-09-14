@@ -7,7 +7,7 @@ models through its OpenAI-compatible proxy.
 > **Community project. Not supported by Broadcom/VMware.** No warranty, no SLA, not an official
 > distribution. Issues and PRs are welcome, but nothing here is a supported product.
 
-Zero runtime dependencies. Four plain JavaScript files. The source tree **is** the installed
+Zero runtime dependencies. Shared plain JavaScript modules with separate V1 and V2 entry points. The source tree **is** the installed
 artifact — there is nothing to build and no package manager in the install path.
 
 **What you get:**
@@ -21,7 +21,25 @@ artifact — there is nothing to build and no package manager in the install pat
 - **No secrets in your config file** — the API key lives in a `0600` file under opencode's data
   dir; the config holds only the proxy URL.
 
-## Install
+## Runtime compatibility
+
+| Runtime | Install | Launch / authenticate |
+| --- | --- | --- |
+| OpenCode V1 | `opencode-tanzu-install --runtime v1` (default) | `opencode providers login -p tanzu`, then `opencode` |
+| OpenCode V2 / beta | `opencode-tanzu-install --runtime v2` | Set Tanzu environment variables, then `opencode-tanzu-v2` |
+
+V2 support starts in plugin **0.3.0** and supports the native plugin API in
+OpenCode **2.0.3** and **0.0.0-beta-19425**. Beta APIs can change; other snapshots require
+verification. V2 is the beta runtime line here, not a separate third plugin.
+The installer does not install OpenCode itself. Install your chosen runtime
+separately; the V2 wrapper uses `opencode2` on PATH or `OPENCODE_V2_BIN`.
+
+See [standalone V2 setup](docs/opencode-v2.md) for Homebrew, clone, project,
+credential rotation, native config, troubleshooting and validation instructions.
+No buildpack, `VCAP_SERVICES`, CF application or platform deployment is required.
+You need a reachable Tanzu endpoint and its service-key credentials.
+
+## Install (V1)
 
 Via Homebrew:
 
@@ -37,7 +55,7 @@ git clone https://github.com/nkuhn-vmw/opencode-tanzu.git
 cd opencode-tanzu && ./install.sh
 ```
 
-Both do the same thing: copy the four `src/*.js` files into opencode's global plugin directory
+Both do the same thing: copy the four V1 JavaScript files into opencode's global plugin directory
 (`${XDG_CONFIG_HOME:-~/.config}/opencode/plugins/`), where opencode auto-loads them at startup.
 Update with `brew upgrade opencode-tanzu && opencode-tanzu-install` (or `git pull &&
 ./install.sh`); remove with `opencode-tanzu-install --uninstall` (or `./install.sh
@@ -278,8 +296,8 @@ built at startup.
 If the probe cannot determine it, a hand-written `models` override in
 `~/.config/opencode/opencode.json` will **not** help — see
 [Caveat: a hand-pinned roster will be replaced](#caveat-a-hand-pinned-roster-will-be-replaced):
-the config hook overwrites `provider.tanzu.models` unconditionally on every
-start, plugin installed or not. Two options that actually work instead:
+the V1 plugin config hook overwrites `provider.tanzu.models` on every
+start while the plugin is installed. Two options that actually work instead:
 
 - Add a row for the model to `src/opencode-tanzu-capabilities.js` (a context
   window, an output limit, `tool_call`) and reinstall — this is the same file
@@ -313,7 +331,7 @@ Verified against opencode 1.18.1.
 ## Development
 
 ```bash
-npm test          # node --test; 76 tests, no dependencies
+npm test          # node --test; no dependencies
 ```
 
 The plugin registers its provider through opencode's plugin `config`/`auth` hooks. The provider
