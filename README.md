@@ -16,10 +16,10 @@ artifact — there is nothing to build and no package manager in the install pat
   data egress; the agent's brain runs on your own Cloud Foundry foundation.
 - **Live roster discovery**: models are discovered from your foundation's `/v1/models` on every
   start, so the picker tracks tile roster changes automatically.
-- A **login flow** (`opencode providers login -p tanzu`) that validates your credentials against
-  the foundation before saving anything.
-- **No secrets in your config file** — the API key lives in a `0600` file under opencode's data
-  dir; the config holds only the proxy URL.
+- A **V1 login flow** (`opencode providers login -p tanzu`) that validates credentials before
+  saving them, and **V2 token-file authentication** with credentials reread for each request.
+- **No secrets in your config file** — V1 saves the API key in a `0600` file under its data
+  directory; V2 uses your private token file or a secret supplied through the environment.
 
 ## Runtime compatibility
 
@@ -30,7 +30,7 @@ artifact — there is nothing to build and no package manager in the install pat
 
 V2 support starts in plugin **0.3.0** and supports the native plugin API in
 OpenCode **2.0.3** and **0.0.0-beta-19425**. Beta APIs can change; other snapshots require
-verification. V2 is the beta runtime line here, not a separate third plugin.
+verification. Stable V2 and the tested beta use the same native adapter.
 The installer does not install OpenCode itself. Install your chosen runtime
 separately; the V2 wrapper uses `opencode2` on PATH or `OPENCODE_V2_BIN`.
 
@@ -52,7 +52,6 @@ If current Homebrew reports an untrusted community tap, review the
 [tap repository](https://github.com/nkuhn-vmw/homebrew-tap), run
 `brew trust --tap nkuhn-vmw/tap`, then retry. This trusts formula code from
 that tap.
-
 
 Or from a clone:
 
@@ -80,7 +79,7 @@ you review is exactly what runs. (The plugin also works packaged via the `plugin
 just not the recommended path.)
 </details>
 
-## Log in
+## Log in (V1)
 
 ```bash
 opencode providers login -p tanzu
