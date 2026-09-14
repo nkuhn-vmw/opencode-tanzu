@@ -1,15 +1,19 @@
 {
   "name": "opencode-tanzu",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "opencode provider plugin for Tanzu Platform GenAI (community project, not supported by Broadcom)",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/opencode-tanzu.js",
   "exports": {
-    ".": "./src/opencode-tanzu.js"
+    ".": "./src/opencode-tanzu.js",
+    "./v2": "./src/opencode-tanzu-v2.js"
   },
   "files": [
     "src",
+    "bin",
+    "install.sh",
+    "examples",
     "LICENSE"
   ],
   "scripts": {
