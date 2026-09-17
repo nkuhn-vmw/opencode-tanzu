@@ -6,6 +6,10 @@ import {
   unknownChatIds,
   MIN_PLAUSIBLE_CONTEXT,
   MAX_PLAUSIBLE_CONTEXT,
+  MODEL_OPTION_SPEC,
+  sanitizeModelOptions,
+  parseModelOptionsOverride,
+  applyModelOptions,
 } from "../src/opencode-tanzu-capabilities.js"
 
 const QWEN = "cyankiwi/Qwen3.6-27B-AWQ-INT4"
@@ -217,7 +221,7 @@ test("every installed module has a loadable default export", async () => {
 // REGRESSION: DeepSeek-V4-Flash on NDC ran as an unknown id (8192-context
 // default -> nonstop compaction) AND without the anti-loop sampling params.
 // The V4 family deterministically loops narration ("Let me X" x N, no tool
-// call) at temp 0 once history is primed; frequencyPenalty 0.5 breaks the
+// call) at temp 0 once history is primed; frequency_penalty 0.5 breaks the
 // trap 5/5 even at temp 0 (measured on the NDC worker, 2026-08-17).
 test("DeepSeek-V4-Flash carries served context and anti-loop sampling options", () => {
   const DS = "deepseek-ai/DeepSeek-V4-Flash-0731"
@@ -225,7 +229,7 @@ test("DeepSeek-V4-Flash carries served context and anti-loop sampling options", 
   assert.equal(out[DS].limit.context, 262144)
   assert.equal(out[DS].tool_call, true)
   assert.ok(!/unverified/i.test(out[DS].name))
-  assert.deepEqual(out[DS].options, { temperature: 1.0, topP: 0.95, frequencyPenalty: 0.5 })
+  assert.deepEqual(out[DS].options, { temperature: 1.0, top_p: 0.95, frequency_penalty: 0.5 })
 })
 
 test("Qwen3.8-27B-FP8 carries served context, multimodal input, and thinking-safe sampling", () => {
@@ -233,7 +237,7 @@ test("Qwen3.8-27B-FP8 carries served context, multimodal input, and thinking-saf
   const out = resolveModels([{ id: Q }])
   assert.equal(out[Q].limit.context, 262144)
   assert.deepEqual(out[Q].modalities.input, ["text", "image", "video"])
-  assert.deepEqual(out[Q].options, { temperature: 1.0, topP: 0.95 })
+  assert.deepEqual(out[Q].options, { temperature: 1.0, top_p: 0.95 })
 })
 
 // Family fallback: a FUTURE deepseek id with no table row must still get the
@@ -242,7 +246,7 @@ test("unknown deepseek ids inherit family anti-loop options", () => {
   const FUTURE = "deepseek-ai/DeepSeek-V5-Hypothetical"
   const out = resolveModels([{ id: FUTURE }])
   assert.equal(out[FUTURE].limit.context, CONSERVATIVE_CONTEXT)
-  assert.equal(out[FUTURE].options.frequencyPenalty, 0.5)
+  assert.equal(out[FUTURE].options.frequency_penalty, 0.5)
   assert.ok(/unverified/i.test(out[FUTURE].name))
 })
 
@@ -260,4 +264,144 @@ test("multimodal rows derive attachment: true; text-only rows do not", () => {
   const out = resolveModels([{ id: Q }, { id: DS }])
   assert.equal(out[Q].attachment, true)
   assert.equal(out[DS].attachment, undefined)
+})
+
+// ---------------------------------------------------------------------------
+// Per-model request options: wire shape, validation, operator override.
+// ---------------------------------------------------------------------------
+
+const DS_ID = "deepseek-ai/DeepSeek-V4-Flash-0731"
+
+/** Collects warnings so a test can assert a bad value was REPORTED, not just dropped. */
+function collector() {
+  const seen = []
+  return { seen, onWarn: (m) => seen.push(m) }
+}
+
+// REGRESSION (2026-09-17): 0.2.3/0.2.4 emitted AI SDK CallSettings spellings
+// (`topP`, `frequencyPenalty`). opencode puts a model entry's `options` into
+// the provider-options bag, and @ai-sdk/openai-compatible spreads that bag
+// VERBATIM into the /chat/completions body — so those keys travelled to vLLM
+// as unknown fields literally named `topP`/`frequencyPenalty` and the sampler
+// never saw them. The anti-loop fix was inert for two releases. Wire spelling
+// is the contract; this test is the guard against regressing to camelCase.
+test("bundled options use OpenAI-compatible WIRE spelling, never AI SDK CallSettings spelling", () => {
+  const out = resolveModels([{ id: DS_ID }, { id: "Qwen/Qwen3.8-27B-FP8" }, { id: "deepseek-ai/Future" }])
+  for (const [id, meta] of Object.entries(out)) {
+    if (!meta.options) continue
+    for (const key of Object.keys(meta.options)) {
+      assert.ok(
+        key in MODEL_OPTION_SPEC,
+        `${id} carries "${key}", which is not an accepted wire option (${Object.keys(MODEL_OPTION_SPEC).join(", ")})`,
+      )
+      assert.ok(!/[A-Z]/.test(key), `${id} carries camelCase option "${key}"; the wire spelling is snake_case`)
+    }
+  }
+})
+
+test("the DeepSeek row emits exactly the proven anti-loop options", () => {
+  const out = resolveModels([{ id: DS_ID }])
+  assert.deepEqual(out[DS_ID].options, { temperature: 1, top_p: 0.95, frequency_penalty: 0.5 })
+  assert.deepEqual(out[DS_ID].limit, { context: 262144, output: 32768 })
+})
+
+// The table is a module singleton; an override merged into one resolved entry
+// must not follow the reference back into it and poison every later call.
+test("resolveModels hands out a copy of the table's options, not the table's object", () => {
+  const first = resolveModels([{ id: DS_ID }])
+  applyModelOptions(first, { [DS_ID]: { frequency_penalty: 1.5 } })
+  const second = resolveModels([{ id: DS_ID }])
+  assert.equal(second[DS_ID].options.frequency_penalty, 0.5)
+})
+
+test("sanitizeModelOptions accepts every spec key at its range edges", () => {
+  const { seen, onWarn } = collector()
+  const raw = {}
+  for (const [key, spec] of Object.entries(MODEL_OPTION_SPEC)) raw[key] = spec.min
+  assert.deepEqual(sanitizeModelOptions(raw, { onWarn }), raw)
+  assert.deepEqual(seen, [])
+})
+
+test("sanitizeModelOptions rejects unknown keys with a clear message and keeps the rest", () => {
+  const { seen, onWarn } = collector()
+  const out = sanitizeModelOptions({ frequency_penalty: 0.5, frequencyPenalty: 0.5, nonsense: 1 }, { onWarn })
+  assert.deepEqual(out, { frequency_penalty: 0.5 })
+  assert.equal(seen.length, 2)
+  assert.ok(seen.some((m) => m.includes('unknown request option "frequencyPenalty"')))
+  assert.ok(seen.every((m) => m.includes("accepted options:")))
+})
+
+test("sanitizeModelOptions rejects out-of-range, non-numeric and non-integer values", () => {
+  const { seen, onWarn } = collector()
+  const out = sanitizeModelOptions(
+    { frequency_penalty: 9, temperature: "1", top_k: 1.5, top_p: Number.NaN, min_p: 0.2 },
+    { onWarn },
+  )
+  assert.deepEqual(out, { min_p: 0.2 })
+  assert.equal(seen.length, 4)
+  assert.ok(seen.some((m) => m.includes("between -2 and 2")))
+  assert.ok(seen.some((m) => m.includes("must be a finite number")))
+  assert.ok(seen.some((m) => m.includes("must be a whole number")))
+})
+
+test("sanitizeModelOptions returns undefined (not a crash) for a non-object", () => {
+  const { seen, onWarn } = collector()
+  for (const bad of [null, 5, "x", [1, 2]]) {
+    assert.equal(sanitizeModelOptions(bad, { onWarn }), undefined)
+  }
+  assert.equal(seen.length, 4)
+})
+
+test("parseModelOptionsOverride parses a well-formed override", () => {
+  const { seen, onWarn } = collector()
+  const out = parseModelOptionsOverride(`{"${DS_ID}":{"frequency_penalty":0.5,"temperature":0.7}}`, { onWarn })
+  assert.deepEqual(out, { [DS_ID]: { frequency_penalty: 0.5, temperature: 0.7 } })
+  assert.deepEqual(seen, [])
+})
+
+test("parseModelOptionsOverride treats absent/blank as no override", () => {
+  assert.deepEqual(parseModelOptionsOverride(undefined), {})
+  assert.deepEqual(parseModelOptionsOverride("   "), {})
+})
+
+// Half an operator's sampling intent is not a safer state than none of it:
+// unparseable JSON is discarded whole, loudly.
+test("parseModelOptionsOverride discards malformed JSON whole and reports it", () => {
+  const { seen, onWarn } = collector()
+  assert.deepEqual(parseModelOptionsOverride("{not json", { onWarn }), {})
+  assert.equal(seen.length, 1)
+  assert.ok(seen[0].includes("not valid JSON"))
+
+  const second = collector()
+  assert.deepEqual(parseModelOptionsOverride('["a"]', { onWarn: second.onWarn }), {})
+  assert.ok(second.seen[0].includes("keyed by served model id"))
+})
+
+test("parseModelOptionsOverride keeps good entries when one entry is bad", () => {
+  const { seen, onWarn } = collector()
+  const out = parseModelOptionsOverride(`{"${DS_ID}":{"frequency_penalty":0.5},"acme/x":"nope"}`, { onWarn })
+  assert.deepEqual(out, { [DS_ID]: { frequency_penalty: 0.5 } })
+  assert.equal(seen.length, 1)
+})
+
+test("applyModelOptions merges per key over the bundled defaults", () => {
+  const models = resolveModels([{ id: DS_ID }])
+  applyModelOptions(models, { [DS_ID]: { frequency_penalty: 1.1 } })
+  assert.deepEqual(models[DS_ID].options, { temperature: 1, top_p: 0.95, frequency_penalty: 1.1 })
+})
+
+test("applyModelOptions gives options to a model that had none", () => {
+  const models = resolveModels([{ id: "acme/some-model" }])
+  applyModelOptions(models, { "acme/some-model": { temperature: 0.2 } })
+  assert.deepEqual(models["acme/some-model"].options, { temperature: 0.2 })
+})
+
+// A typo in a `cf set-env` should not be silent for a week.
+test("applyModelOptions reports an override naming a model the roster does not serve", () => {
+  const { seen, onWarn } = collector()
+  const models = resolveModels([{ id: DS_ID }])
+  applyModelOptions(models, { "acme/not-served": { temperature: 0.2 } }, { onWarn })
+  assert.equal(seen.length, 1)
+  assert.ok(seen[0].includes("acme/not-served"))
+  assert.deepEqual(models[DS_ID].options, { temperature: 1, top_p: 0.95, frequency_penalty: 0.5 })
 })

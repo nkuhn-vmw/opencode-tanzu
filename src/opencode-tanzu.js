@@ -99,7 +99,13 @@ import { readFileSync } from "node:fs"
 import { chmod, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 
-import { resolveModels, TABLE, unknownChatIds } from "./opencode-tanzu-capabilities.js"
+import {
+  applyModelOptions,
+  parseModelOptionsOverride,
+  resolveModels,
+  TABLE,
+  unknownChatIds,
+} from "./opencode-tanzu-capabilities.js"
 import { CLAMPED, discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "./opencode-tanzu-discovery.js"
 import { dataDir, getEntry, readCache, setEntry, writeCache } from "./opencode-tanzu-cache.js"
 
@@ -524,6 +530,36 @@ export async function enrichUnknownCards(cards, baseURL, apiKey, budgetMs = PROB
   return { cards: enrichedCards, toolCalls }
 }
 
+/**
+ * Settle each registered model's per-model request options: the bundled
+ * defaults from the capability table, with `OPENCODE_TANZU_MODEL_OPTIONS_JSON`
+ * merged over them key by key, then one log line per model that ends up with
+ * any. Those options are spread verbatim into the /chat/completions body (see
+ * the wire-contract note in `opencode-tanzu-capabilities.js`), so what is
+ * logged here is literally what the backend will be sent — which is the point:
+ * "did fp=0.5 actually reach the worker?" should be answerable from the app
+ * log, not from a packet capture.
+ *
+ * Resolved from `process.env` on every call so the process env stays
+ * authoritative (mirrors `secretPath`). Never throws: a malformed override is
+ * a logged warning and the bundled defaults, never a failed startup.
+ *
+ * @param {Record<string, object>} models output of `resolveModels`
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {Record<string, object>} the same `models` object
+ */
+export function applyModelOptionsFromEnv(models, env = process.env) {
+  const warn = (message) => console.error(`[tanzu] ${message}`)
+  const overrides = parseModelOptionsOverride(env.OPENCODE_TANZU_MODEL_OPTIONS_JSON, { onWarn: warn })
+  applyModelOptions(models, overrides, { onWarn: warn })
+  for (const [id, meta] of Object.entries(models)) {
+    if (meta?.options && Object.keys(meta.options).length > 0) {
+      console.error(`[tanzu] applied model options for ${id}: ${JSON.stringify(meta.options)}`)
+    }
+  }
+  return models
+}
+
 export const TanzuPlugin = async (input) => {
   return {
     config: async (cfg) => {
@@ -578,6 +614,8 @@ export const TanzuPlugin = async (input) => {
         pruneModellessStanza(cfg, "No usable chat models were found.")
         return
       }
+
+      applyModelOptionsFromEnv(models)
 
       const existing = cfg.provider?.[PROVIDER_ID] ?? {}
       // The key goes into the IN-MEMORY config only, because that is what

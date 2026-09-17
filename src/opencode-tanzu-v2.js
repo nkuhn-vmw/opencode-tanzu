@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs"
 import { resolveModels, CONSERVATIVE_CONTEXT, CONSERVATIVE_OUTPUT, MIN_PLAUSIBLE_CONTEXT, MAX_PLAUSIBLE_CONTEXT } from "./opencode-tanzu-capabilities.js"
 import { discoverModels } from "./opencode-tanzu-discovery.js"
-import { enrichUnknownCards, PROBE_PHASE_BUDGET_MS } from "./opencode-tanzu.js"
+import { applyModelOptionsFromEnv, enrichUnknownCards, PROBE_PHASE_BUDGET_MS } from "./opencode-tanzu.js"
 
 const PROVIDER_ID = "tanzu"
 import { createTransport } from "./opencode-tanzu-transport.js"
@@ -48,6 +48,10 @@ export async function discoverCatalog(baseURL, apiKey) {
     }
     if (enriched.toolCalls.has(id)) model.tool_call = enriched.toolCalls.get(id)
   }
+  // Same operator override the V1 config hook honours, applied here so a
+  // standalone V2 install and a V1 install put identical sampling parameters on
+  // the wire. `applySamplingDefaults` below reads these `options` per model.
+  applyModelOptionsFromEnv(models)
   return models
 }
 
