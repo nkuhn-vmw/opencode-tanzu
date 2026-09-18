@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.1] — 2026-09-18
+
+- Do not echo rejected nonnumeric sampling-option values in diagnostics.
+  Arbitrary strings and objects may contain accidentally supplied secrets.
+  Validated numeric options remain visible for configuration auditing.
+
 ## [0.4.0] — 2026-09-17
 
 ### Fixed
