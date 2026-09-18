@@ -128,7 +128,7 @@ export function sanitizeModelOptions(raw, { where = "model options", onWarn = ()
   }
   const out = {}
   for (const [key, value] of Object.entries(raw)) {
-    const spec = MODEL_OPTION_SPEC[key]
+    const spec = Object.hasOwn(MODEL_OPTION_SPEC, key) ? MODEL_OPTION_SPEC[key] : undefined
     if (!spec) {
       onWarn(`${where}: unknown request option "${key}"; ignored (accepted options: ${KNOWN_OPTION_KEYS})`)
       continue
@@ -169,8 +169,8 @@ export function parseModelOptionsOverride(rawJSON, { onWarn = () => {} } = {}) {
   let parsed
   try {
     parsed = JSON.parse(text)
-  } catch (err) {
-    onWarn(`OPENCODE_TANZU_MODEL_OPTIONS_JSON is not valid JSON (${err.message}); ignoring it entirely`)
+  } catch {
+    onWarn("OPENCODE_TANZU_MODEL_OPTIONS_JSON is not valid JSON; ignoring it entirely")
     return {}
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -183,7 +183,7 @@ export function parseModelOptionsOverride(rawJSON, { onWarn = () => {} } = {}) {
   const out = {}
   for (const [id, value] of Object.entries(parsed)) {
     const clean = sanitizeModelOptions(value, { where: `OPENCODE_TANZU_MODEL_OPTIONS_JSON["${id}"]`, onWarn })
-    if (clean) out[id] = clean
+    if (clean) Object.defineProperty(out, id, { value: clean, enumerable: true, configurable: true, writable: true })
   }
   return out
 }
@@ -204,7 +204,7 @@ export function parseModelOptionsOverride(rawJSON, { onWarn = () => {} } = {}) {
  */
 export function applyModelOptions(models, overrides, { onWarn = () => {} } = {}) {
   for (const [id, override] of Object.entries(overrides ?? {})) {
-    const entry = models?.[id]
+    const entry = models && Object.hasOwn(models, id) ? models[id] : undefined
     if (!entry) {
       onWarn(`OPENCODE_TANZU_MODEL_OPTIONS_JSON names "${id}", which this foundation does not serve; ignored`)
       continue
@@ -365,13 +365,14 @@ export const TABLE = {
   // Re-confirmed 2026-09-17 by a blind 8-replicate A/B replay of the worst
   // real failing session against the live NDC worker: frequency_penalty 0.5
   // gave 0/8 hard degenerations, frequency_penalty 0 gave 4/8 (finish=length,
-  // 15-17K-char loop blobs), Fisher's exact p ≈ 0.0001. It works because this
-  // worker serves chat (non-thinking) mode, where penalties apply — the public
-  // "penalties are a no-op on DeepSeek" advice describes thinking mode only.
-  // Verified NON-fixes, do not add: reasoning_effort tuning (renders the
-  // prefix, changes nothing), chat_template_kwargs (ignored outright by this
-  // entrypoint), reasoning_effort:"none" (0/8 too — the penalty does all the
-  // work either way). Keep exactly temperature 1, top_p 0.95, fp 0.5.
+  // 15-17K-char loop blobs). One-sided Fisher exact p = 0.03846;
+  // two-sided p = 0.07692. The investigator reports pooled p = 2.9e-4
+  // across arms; that is a separate comparison, not this 8-versus-8 arm.
+  // Through the tile proxy, reasoning_effort is not inert: thinking tokens
+  // are generated and stripped before the proxy drops the field. The replay
+  // does not establish a non-thinking serving mode or a causal explanation.
+  // Keep temperature 1, top_p 0.95, frequency_penalty 0.5; full-suite v5
+  // re-benchmarking remains the acceptance gate.
   //
   // Wire spelling (top_p / frequency_penalty), NOT AI SDK CallSettings
   // spelling — see the "PER-MODEL REQUEST OPTIONS" note above.

@@ -241,7 +241,7 @@ that model. Today:
 
 | Model | Options | Why |
 |---|---|---|
-| `deepseek-ai/DeepSeek-V4-Flash-0731` | `temperature 1`, `top_p 0.95`, `frequency_penalty 0.5` | `temperature`/`top_p` are DeepSeek's official agentic recommendation for the 0731 variant. `frequency_penalty 0.5` is the **measured** fix for the V4-family long-context narration loop: on a blind 8-replicate replay of the worst real failing session against the NDC worker, `frequency_penalty 0.5` produced **0/8** hard degenerations and `frequency_penalty 0` produced **4/8** (Fisher's exact p ≈ 0.0001, 2026-09-17). It works because that worker serves chat (non-thinking) mode, where penalties apply. |
+| `deepseek-ai/DeepSeek-V4-Flash-0731` | `temperature 1`, `top_p 0.95`, `frequency_penalty 0.5` | `temperature`/`top_p` are DeepSeek's official agentic recommendation for the 0731 variant. `frequency_penalty 0.5` is the **measured** fix for the V4-family long-context narration loop: on a blind 8-replicate replay of the worst real failing session against the NDC worker, `frequency_penalty 0.5` produced **0/8** hard degenerations and `frequency_penalty 0` produced **4/8** (one-sided Fisher exact p ≈ 0.0385; two-sided p ≈ 0.0769, 2026-09-17). This replay does not establish a non-thinking serving mode. |
 | `Qwen/Qwen3.8-27B-FP8` | `temperature 1`, `top_p 0.95` | Thinking models can stall in the think phase at temperature 0. |
 | any other `deepseek*` / `qwen*` id | the same family defaults | Anti-loop insurance until a verified table row exists. The tile strips every field but the id from `/v1/models`, so family matching on the id is the only discovery available. |
 
@@ -258,7 +258,7 @@ the top of `src/opencode-tanzu-capabilities.js` for the trace through opencode's
 The standalone V2 provider hid this. Its `applySamplingDefaults` rewrites
 `topP`/`frequencyPenalty`/`presencePenalty` to their wire names before forwarding and passes every
 other key through unchanged, so camelCase worked there and only there. Wire spelling is correct on
-both runtimes; camelCase was correct on neither.
+both runtimes; camelCase was supported only by the standalone V2 rewrite.
 
 #### Overriding them: `OPENCODE_TANZU_MODEL_OPTIONS_JSON`
 
@@ -289,8 +289,8 @@ than none of it. A well-formed document with one bad key keeps the good keys and
 one was dropped. An id the foundation does not serve is reported rather than silently ignored,
 because that is nearly always a typo. Nothing here can fail a startup.
 
-Whatever ends up applied is logged once per model at startup, which is also how you confirm a
-parameter actually reached the backend:
+Configured options are logged once per model at startup. This confirms configuration,
+not receipt by the backend; request-level evidence is needed for that:
 
 ```
 [tanzu] applied model options for deepseek-ai/DeepSeek-V4-Flash-0731: {"temperature":1,"top_p":0.95,"frequency_penalty":0.5}

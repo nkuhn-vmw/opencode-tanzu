@@ -405,3 +405,28 @@ test("applyModelOptions reports an override naming a model the roster does not s
   assert.ok(seen[0].includes("acme/not-served"))
   assert.deepEqual(models[DS_ID].options, { temperature: 1, top_p: 0.95, frequency_penalty: 0.5 })
 })
+
+test("sampling allowlist rejects inherited property names", () => {
+  assert.deepEqual(sanitizeModelOptions(JSON.parse('{"constructor":1,"toString":1,"__proto__":1,"temperature":1}')), { temperature: 1 })
+})
+
+test("override model ids cannot mutate object prototypes", () => {
+  const raw = '{"__proto__":{"temperature":1},"constructor":{"top_p":0.5}}'
+  const overrides = parseModelOptionsOverride(raw)
+  assert.equal(Object.getPrototypeOf(overrides), Object.prototype)
+  assert.equal(Object.hasOwn(overrides, "__proto__"), true)
+  const warnings = []
+  const models = { served: { options: { temperature: 0.5 } } }
+  applyModelOptions(models, overrides, { onWarn: (message) => warnings.push(message) })
+  assert.equal(Object.hasOwn(Object.prototype, "options"), false)
+  assert.equal(Object.hasOwn(Object, "options"), false)
+  assert.equal(warnings.length, 2)
+  assert.deepEqual(models.served.options, { temperature: 0.5 })
+})
+
+test("malformed override warnings do not echo input values", () => {
+  const warnings = []
+  parseModelOptionsOverride('sensitive-value', { onWarn: (message) => warnings.push(message) })
+  assert.equal(warnings.length, 1)
+  assert.ok(!warnings[0].includes('sensitive-value'))
+})

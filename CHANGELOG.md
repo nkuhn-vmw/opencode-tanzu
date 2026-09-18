@@ -3,6 +3,9 @@
 ## [0.4.0] — 2026-09-17
 
 ### Fixed
+- Sampling-option validation checks own properties only. Prototype-named
+  model ids cannot mutate shared object prototypes, and malformed JSON
+  warnings do not echo the input document.
 - **Per-model request options were inert and are now actually sent.** The
   `options` blocks added in 0.2.3 (DeepSeek-V4-Flash and Qwen3.8-27B-FP8, plus
   the `deepseek*`/`qwen*` family fallbacks) used AI SDK **CallSettings**
@@ -28,8 +31,7 @@
   rewrites `topP`/`frequencyPenalty`/`presencePenalty` to their wire names in
   `applySamplingDefaults` before forwarding and passes every other key
   through unchanged. Wire spelling is therefore correct on BOTH runtimes; the
-  camelCase spelling was correct on neither, because the V1 path has no such
-  rewrite.
+  camelCase spelling was supported only by the standalone V2 rewrite.
 - `resolveModels` hands out a copy of the table's `options` object rather than
   the table's own reference, so an override merged into one resolved entry
   cannot leak back into `TABLE` and affect every later call in the process.
@@ -50,15 +52,16 @@
   it over the resolved roster, so a V1 install and a V2 install put identical
   sampling parameters on the wire.
 - A startup log line per model that carries options —
-  `[tanzu] applied model options for <id>: {…}` — so "did `frequency_penalty`
-  actually reach the worker?" is answerable from the log instead of a packet
-  capture.
+  `[tanzu] applied model options for <id>: {…}` — to expose the configured sampling options. This is not proof that the
+  worker received them.
 - Re-confirmation of the DeepSeek-V4-Flash anti-loop evidence in the table
   comment: a blind 8-replicate A/B replay of the worst real failing session
   against the live NDC worker gave 0/8 hard degenerations at
-  `frequency_penalty 0.5` versus 4/8 at 0 (Fisher's exact p ≈ 0.0001,
-  2026-09-17), plus the verified non-fixes (`reasoning_effort` tuning,
-  `chat_template_kwargs`, `reasoning_effort: "none"`) so they are not retried.
+  `frequency_penalty 0.5` versus 4/8 at 0 (one-sided Fisher exact p ≈ 0.0385; two-sided p ≈ 0.0769,
+  2026-09-17). Through the tile proxy, `reasoning_effort` is not inert:
+  thinking tokens are generated and stripped before the proxy drops the field.
+  The investigator reports pooled p = 2.9e-4 across arms, a separate
+  comparison. Full-suite v5 re-benchmarking remains the acceptance gate.
 
 ### Notes
 - The companion loop-guard plugin (`opencode-deepseek-guard.js`) does not ship
