@@ -430,3 +430,14 @@ test("malformed override warnings do not echo input values", () => {
   assert.equal(warnings.length, 1)
   assert.ok(!warnings[0].includes('sensitive-value'))
 })
+
+
+test("rejected sampling values never appear in validation diagnostics", () => {
+  const warnings = []
+  const clean = sanitizeModelOptions({ temperature: "secret-sentinel", seed: { token: "secret-sentinel" } }, {
+    onWarn: message => warnings.push(message),
+  })
+  assert.deepEqual(clean, {})
+  assert.equal(warnings.length, 2)
+  assert.ok(warnings.every(message => !message.includes("secret-sentinel")))
+})

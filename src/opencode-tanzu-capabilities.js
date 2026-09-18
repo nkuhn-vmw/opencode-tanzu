@@ -134,7 +134,7 @@ export function sanitizeModelOptions(raw, { where = "model options", onWarn = ()
       continue
     }
     if (typeof value !== "number" || !Number.isFinite(value)) {
-      onWarn(`${where}: "${key}" must be a finite number, got ${JSON.stringify(value)}; ignored`)
+      onWarn(`${where}: "${key}" must be a finite number; ignored`)
       continue
     }
     if (spec.integer && !Number.isInteger(value)) {
