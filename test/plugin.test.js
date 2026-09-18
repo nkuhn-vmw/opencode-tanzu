@@ -12,6 +12,7 @@ import {
   PROBE_ID_CAP,
   PROBE_CONCURRENCY_LIMIT,
   enrichUnknownCards,
+  applyModelOptionsFromEnv,
 } from "../src/opencode-tanzu.js"
 import { TABLE, CONSERVATIVE_CONTEXT, resolveModels } from "../src/opencode-tanzu-capabilities.js"
 import { cachePath } from "../src/opencode-tanzu-cache.js"
@@ -1019,4 +1020,93 @@ test("a second start probes the tail the first start's cap skipped, once the hea
       }
     }),
   )
+})
+
+// ---------------------------------------------------------------------------
+// Per-model request options reach the REGISTERED model entries.
+//
+// This is the end of the chain the CF path depends on: table defaults +
+// OPENCODE_TANZU_MODEL_OPTIONS_JSON must land on `cfg.provider.tanzu.models`,
+// because that object is what opencode hands to @ai-sdk/openai-compatible,
+// which spreads it verbatim into the /chat/completions body.
+// ---------------------------------------------------------------------------
+
+const DS = "deepseek-ai/DeepSeek-V4-Flash-0731"
+const DS_ROSTER = { data: [{ id: DS }] }
+
+/** Capture console.error for the duration of `fn`. */
+async function withCapturedLog(fn) {
+  const real = console.error
+  const lines = []
+  console.error = (...args) => lines.push(args.join(" "))
+  try {
+    await fn(lines)
+  } finally {
+    console.error = real
+  }
+  return lines
+}
+
+test("registered DeepSeek entry carries the proven anti-loop options in wire spelling", async () => {
+  await withEnv({ ...NO_ENV, OPENCODE_TANZU_MODEL_OPTIONS_JSON: undefined }, async () => {
+    const cfg = { provider: { tanzu: { options: { baseURL: BASE, apiKey: "k" } } } }
+    const h = await hooks()
+    await withCapturedLog(() => withFetch(async () => jsonResponse(DS_ROSTER), () => h.config(cfg)))
+    assert.deepEqual(cfg.provider.tanzu.models[DS].options, {
+      temperature: 1,
+      top_p: 0.95,
+      frequency_penalty: 0.5,
+    })
+  })
+})
+
+test("OPENCODE_TANZU_MODEL_OPTIONS_JSON merges over the bundled options on the registered entry", async () => {
+  await withEnv(
+    { ...NO_ENV, OPENCODE_TANZU_MODEL_OPTIONS_JSON: `{"${DS}":{"frequency_penalty":1.25}}` },
+    async () => {
+      const cfg = { provider: { tanzu: { options: { baseURL: BASE, apiKey: "k" } } } }
+      const h = await hooks()
+      const lines = await withCapturedLog(() =>
+        withFetch(async () => jsonResponse(DS_ROSTER), () => h.config(cfg)),
+      )
+      assert.deepEqual(cfg.provider.tanzu.models[DS].options, {
+        temperature: 1,
+        top_p: 0.95,
+        frequency_penalty: 1.25,
+      })
+      assert.ok(
+        lines.some((l) => l.includes(`applied model options for ${DS}:`) && l.includes('"frequency_penalty":1.25')),
+        `expected an "applied model options" line, got: ${JSON.stringify(lines)}`,
+      )
+    },
+  )
+})
+
+// A bad override must never be able to take the provider down with it.
+test("a malformed override warns and leaves the bundled options in place", async () => {
+  await withEnv({ ...NO_ENV, OPENCODE_TANZU_MODEL_OPTIONS_JSON: "{oops" }, async () => {
+    const cfg = { provider: { tanzu: { options: { baseURL: BASE, apiKey: "k" } } } }
+    const h = await hooks()
+    const lines = await withCapturedLog(() =>
+      withFetch(async () => jsonResponse(DS_ROSTER), () => h.config(cfg)),
+    )
+    assert.deepEqual(cfg.provider.tanzu.models[DS].options, {
+      temperature: 1,
+      top_p: 0.95,
+      frequency_penalty: 0.5,
+    })
+    assert.ok(lines.some((l) => l.includes("not valid JSON")))
+  })
+})
+
+test("applyModelOptionsFromEnv logs one line per model that carries options", async () => {
+  const models = {
+    a: { name: "a", options: { temperature: 0.5 } },
+    b: { name: "b" },
+    c: { name: "c", options: {} },
+  }
+  const lines = await withCapturedLog(async () => applyModelOptionsFromEnv(models, {}))
+  const applied = lines.filter((l) => l.includes("applied model options for"))
+  assert.equal(applied.length, 1)
+  assert.ok(applied[0].includes("applied model options for a: {\"temperature\":0.5}"))
 })

@@ -37,6 +37,183 @@ function isPlausibleContext(value) {
 /** Unknown ids matching this are treated as non-chat and excluded. */
 const NON_CHAT_ID = /embed|rerank/i
 
+/**
+ * PER-MODEL REQUEST OPTIONS — THE WIRE CONTRACT. READ THIS BEFORE EDITING ANY
+ * `options` BLOCK BELOW.
+ *
+ * Investigated 2026-09-17 against the opencode bundle on the NDC ops box
+ * (`~/.opencode/bin/opencode`, 1.2.27) by reading the shipped code, not the
+ * docs. A model entry's `options` object does NOT become AI SDK CallSettings.
+ * opencode merges it into the PROVIDER OPTIONS bag:
+ *
+ *     const options = merge(base, model.options, agent.options, variant)
+ *     streamText({ …, providerOptions: ProviderTransform.providerOptions(model, options) })
+ *
+ * and `ProviderTransform.providerOptions` keys that bag by
+ * `sdkKey(model.api.npm) ?? model.providerID`. `sdkKey` has cases for
+ * @ai-sdk/openai, /anthropic, /google, /amazon-bedrock, /gateway,
+ * /github-copilot and @openrouter/ai-sdk-provider — and NO case for
+ * `@ai-sdk/openai-compatible`, which is the npm this provider registers. So
+ * for us the bag is keyed by the provider id, `"tanzu"`, which is also what
+ * `OpenAICompatibleChatLanguageModel.providerOptionsName` resolves to.
+ *
+ * That model's `getArgs()` then does, after building `temperature`,
+ * `top_p: topP` and `frequency_penalty: frequencyPenalty` out of CallSettings:
+ *
+ *     ...Object.fromEntries(Object.entries(providerOptions["tanzu"] ?? {})
+ *       .filter(([key]) => !Object.keys(openaiCompatibleProviderOptions.shape).includes(key)))
+ *
+ * i.e. every key that is not one of its own three schema keys (`user`,
+ * `reasoningEffort`, `textVerbosity`) is spread VERBATIM into the
+ * /chat/completions JSON body — and, being spread afterwards, overrides the
+ * CallSettings-derived fields. Meanwhile CallSettings `temperature`/`topP`
+ * come only from the agent config and `ProviderTransform`'s per-family
+ * heuristics; a model entry's `options` never reaches them.
+ *
+ * CONSEQUENCE: these keys must be spelled the way the OpenAI-compatible WIRE
+ * spells them (`top_p`, `frequency_penalty`), not the way the AI SDK spells
+ * its CallSettings (`topP`, `frequencyPenalty`). The camelCase spellings this
+ * table shipped in 0.2.3/0.2.4 were INERT — they reached vLLM as unknown body
+ * fields literally named `topP` and `frequencyPenalty`, and the sampler never
+ * saw them, so the measured anti-loop fix was never actually applied through
+ * this plugin. Wire spelling is also exactly what the owner's proven host
+ * `~/.config/opencode/opencode.json` entry uses:
+ *   {"temperature": 1, "top_p": 0.95, "frequency_penalty": 0.5}
+ *
+ * Only keys in `MODEL_OPTION_SPEC` may appear here; anything else would be
+ * forwarded to the backend unvalidated.
+ */
+
+/**
+ * The request options this plugin is willing to put on the wire, with the
+ * range each one is accepted in. Deliberately a small allowlist: whatever
+ * lands in a model entry's `options` is spread straight into the
+ * /chat/completions body (see the note above), so an unrecognised key is a
+ * silent unknown-field on someone's inference endpoint, and an out-of-range
+ * value is a 400 at the worst possible moment. Ranges follow the OpenAI
+ * chat-completions contract that vLLM implements.
+ *
+ * `integer: true` means the value must be a whole number. `top_k: -1` is
+ * vLLM's "disabled" sentinel, which is why its floor is below zero.
+ */
+export const MODEL_OPTION_SPEC = {
+  temperature: { min: 0, max: 2 },
+  top_p: { min: 0, max: 1 },
+  top_k: { min: -1, max: 100_000, integer: true },
+  min_p: { min: 0, max: 1 },
+  frequency_penalty: { min: -2, max: 2 },
+  presence_penalty: { min: -2, max: 2 },
+  repetition_penalty: { min: 0.01, max: 2 },
+  seed: { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true },
+}
+
+const KNOWN_OPTION_KEYS = Object.keys(MODEL_OPTION_SPEC).join(", ")
+
+/**
+ * Validate one `{option: value}` bag against `MODEL_OPTION_SPEC`.
+ *
+ * Never throws and never propagates a bad value: a rejected key is dropped
+ * with an explanatory warning and the rest of the bag still applies. A caller
+ * that hands us something that is not an object at all gets `undefined` back,
+ * because there is no partial result to salvage.
+ *
+ * @param {unknown} raw
+ * @param {{where?: string, onWarn?: (message: string) => void}} [opts]
+ * @returns {Record<string, number>|undefined}
+ */
+export function sanitizeModelOptions(raw, { where = "model options", onWarn = () => {} } = {}) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    onWarn(`${where}: expected a JSON object of request options, got ${Array.isArray(raw) ? "an array" : typeof raw}; ignored`)
+    return undefined
+  }
+  const out = {}
+  for (const [key, value] of Object.entries(raw)) {
+    const spec = Object.hasOwn(MODEL_OPTION_SPEC, key) ? MODEL_OPTION_SPEC[key] : undefined
+    if (!spec) {
+      onWarn(`${where}: unknown request option "${key}"; ignored (accepted options: ${KNOWN_OPTION_KEYS})`)
+      continue
+    }
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      onWarn(`${where}: "${key}" must be a finite number, got ${JSON.stringify(value)}; ignored`)
+      continue
+    }
+    if (spec.integer && !Number.isInteger(value)) {
+      onWarn(`${where}: "${key}" must be a whole number, got ${value}; ignored`)
+      continue
+    }
+    if (value < spec.min || value > spec.max) {
+      onWarn(`${where}: "${key}" must be between ${spec.min} and ${spec.max}, got ${value}; ignored`)
+      continue
+    }
+    out[key] = value
+  }
+  return out
+}
+
+/**
+ * Parse the `OPENCODE_TANZU_MODEL_OPTIONS_JSON` operator override:
+ *
+ *     {"deepseek-ai/DeepSeek-V4-Flash-0731": {"frequency_penalty": 0.5}}
+ *
+ * A malformed document is discarded WHOLE and reported, rather than partially
+ * applied — half an operator's sampling intent is not a safer state than none
+ * of it. A well-formed document with one bad entry keeps the good entries.
+ *
+ * @param {unknown} rawJSON value of the env var
+ * @param {{onWarn?: (message: string) => void}} [opts]
+ * @returns {Record<string, Record<string, number>>} overrides keyed by model id
+ */
+export function parseModelOptionsOverride(rawJSON, { onWarn = () => {} } = {}) {
+  const text = typeof rawJSON === "string" ? rawJSON.trim() : ""
+  if (!text) return {}
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    onWarn("OPENCODE_TANZU_MODEL_OPTIONS_JSON is not valid JSON; ignoring it entirely")
+    return {}
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    onWarn(
+      `OPENCODE_TANZU_MODEL_OPTIONS_JSON must be a JSON object keyed by served model id, ` +
+        `e.g. {"deepseek-ai/DeepSeek-V4-Flash-0731":{"frequency_penalty":0.5}}; ignoring it entirely`,
+    )
+    return {}
+  }
+  const out = {}
+  for (const [id, value] of Object.entries(parsed)) {
+    const clean = sanitizeModelOptions(value, { where: `OPENCODE_TANZU_MODEL_OPTIONS_JSON["${id}"]`, onWarn })
+    if (clean) Object.defineProperty(out, id, { value: clean, enumerable: true, configurable: true, writable: true })
+  }
+  return out
+}
+
+/**
+ * Merge operator overrides over the bundled per-model options, in place.
+ *
+ * Merge is per key, not per model: an operator who sets only
+ * `frequency_penalty` keeps the table's `temperature`/`top_p` rather than
+ * silently losing them. An override naming a model the roster does not carry
+ * is reported — that is almost always a typo in a `cf set-env`, and silently
+ * doing nothing is how it stays a typo for a week.
+ *
+ * @param {Record<string, object>} models output of `resolveModels`
+ * @param {Record<string, Record<string, number>>} overrides
+ * @param {{onWarn?: (message: string) => void}} [opts]
+ * @returns {Record<string, object>} the same `models` object
+ */
+export function applyModelOptions(models, overrides, { onWarn = () => {} } = {}) {
+  for (const [id, override] of Object.entries(overrides ?? {})) {
+    const entry = models && Object.hasOwn(models, id) ? models[id] : undefined
+    if (!entry) {
+      onWarn(`OPENCODE_TANZU_MODEL_OPTIONS_JSON names "${id}", which this foundation does not serve; ignored`)
+      continue
+    }
+    entry.options = { ...(entry.options ?? {}), ...override }
+  }
+  return models
+}
+
 export const TABLE = {
   // huggingface.co/cyankiwi/Qwen3.6-27B-AWQ-INT4 — repack of Qwen/Qwen3.6-27B.
   // 262144 = text_config.max_position_embeddings. The card's 1,010,000 figure
@@ -178,12 +355,27 @@ export const TABLE = {
   // Served on NDC at max_model_len 262144 (verified on the worker's vLLM 0.25.1
   // config 2026-08-14; the tile strips the field). Tool calling verified in
   // agentic use. Text-only. `options` are load-bearing, not preference:
-  // temperature/topP are DeepSeek's official agentic recommendation for the
-  // 0731 variant (recipes.vllm.ai), and frequencyPenalty 0.5 is the measured
+  // temperature/top_p are DeepSeek's official agentic recommendation for the
+  // 0731 variant (recipes.vllm.ai), and frequency_penalty 0.5 is the measured
   // fix for the V4-family long-context narration loop — at temp 0 with ~20
   // identical "Let me X" turns in history the model loops deterministically
-  // (5/5); frequencyPenalty 0.5 breaks the trap 5/5 even at temp 0
+  // (5/5); frequency_penalty 0.5 breaks the trap 5/5 even at temp 0
   // (reproduced on the NDC worker 2026-08-17, ndc-ops PLAN doc).
+  //
+  // Re-confirmed 2026-09-17 by a blind 8-replicate A/B replay of the worst
+  // real failing session against the live NDC worker: frequency_penalty 0.5
+  // gave 0/8 hard degenerations, frequency_penalty 0 gave 4/8 (finish=length,
+  // 15-17K-char loop blobs). One-sided Fisher exact p = 0.03846;
+  // two-sided p = 0.07692. The investigator reports pooled p = 2.9e-4
+  // across arms; that is a separate comparison, not this 8-versus-8 arm.
+  // Through the tile proxy, reasoning_effort is not inert: thinking tokens
+  // are generated and stripped before the proxy drops the field. The replay
+  // does not establish a non-thinking serving mode or a causal explanation.
+  // Keep temperature 1, top_p 0.95, frequency_penalty 0.5; full-suite v5
+  // re-benchmarking remains the acceptance gate.
+  //
+  // Wire spelling (top_p / frequency_penalty), NOT AI SDK CallSettings
+  // spelling — see the "PER-MODEL REQUEST OPTIONS" note above.
   "deepseek-ai/DeepSeek-V4-Flash-0731": {
     kind: "chat",
     name: "DeepSeek-V4-Flash (Tanzu)",
@@ -191,7 +383,7 @@ export const TABLE = {
     context: 262144,
     output: 32768,
     modalities: { input: ["text"], output: ["text"] },
-    options: { temperature: 1.0, topP: 0.95, frequencyPenalty: 0.5 },
+    options: { temperature: 1.0, top_p: 0.95, frequency_penalty: 0.5 },
   },
   // Served on NDC at max_model_len 262144 (verified 2026-08-14). Multimodal:
   // image + video input validated end-to-end on the worker (direct file URLs /
@@ -207,7 +399,7 @@ export const TABLE = {
     context: 262144,
     output: 32768,
     modalities: { input: ["text", "image", "video"], output: ["text"] },
-    options: { temperature: 1.0, topP: 0.95 },
+    options: { temperature: 1.0, top_p: 0.95 },
   },
 }
 
@@ -220,9 +412,9 @@ export const TABLE = {
  */
 const FAMILY_OPTIONS = [
   // Anti-loop insurance for the whole DeepSeek-V4 family (see the 0731 row).
-  { match: /deepseek/i, options: { temperature: 1.0, topP: 0.95, frequencyPenalty: 0.5 } },
+  { match: /deepseek/i, options: { temperature: 1.0, top_p: 0.95, frequency_penalty: 0.5 } },
   // Qwen3.5+ thinking models misbehave at temp 0 (think-phase stalls).
-  { match: /qwen/i, options: { temperature: 1.0, topP: 0.95 } },
+  { match: /qwen/i, options: { temperature: 1.0, top_p: 0.95 } },
 ]
 
 function clampOutput(context, output) {
@@ -244,13 +436,17 @@ function fromTable(entry) {
     limit: { context, output: clampOutput(context, entry.output) },
     ...(entry.modalities ? { modalities: entry.modalities } : {}),
     ...(multimodal ? { attachment: true } : {}),
-    ...(entry.options ? { options: entry.options } : {}),
+    // Copied, not aliased: `TABLE` is a module singleton and the operator
+    // override merges into the resolved entry's `options`. Handing out the
+    // table's own object would let one override leak into every later
+    // `resolveModels` call in the same process.
+    ...(entry.options ? { options: { ...entry.options } } : {}),
   }
 }
 
 function familyOptions(id) {
   const hit = FAMILY_OPTIONS.find((f) => f.match.test(id))
-  return hit ? { options: hit.options } : {}
+  return hit ? { options: { ...hit.options } } : {}
 }
 
 function unknownDefaults(id) {

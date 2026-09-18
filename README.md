@@ -233,6 +233,91 @@ and then silently blackholes `/chat/completions` (a packet-dropping firewall or 
 opencode's startup appear to hang for close to that full ~60 seconds before falling back to the
 bundled table for whatever wasn't reached. That is a stall, not a freeze — it resolves on its own.
 
+### Per-model request options
+
+Some models need specific sampling parameters to behave in an agentic loop, so the bundled table
+can carry an `options` block per model, and those options are put on the wire with every request to
+that model. Today:
+
+| Model | Options | Why |
+|---|---|---|
+| `deepseek-ai/DeepSeek-V4-Flash-0731` | `temperature 1`, `top_p 0.95`, `frequency_penalty 0.5` | `temperature`/`top_p` are DeepSeek's official agentic recommendation for the 0731 variant. `frequency_penalty 0.5` is the **measured** fix for the V4-family long-context narration loop: on a blind 8-replicate replay of the worst real failing session against the NDC worker, `frequency_penalty 0.5` produced **0/8** hard degenerations and `frequency_penalty 0` produced **4/8** (one-sided Fisher exact p ≈ 0.0385; two-sided p ≈ 0.0769, 2026-09-17). This replay does not establish a non-thinking serving mode. |
+| `Qwen/Qwen3.8-27B-FP8` | `temperature 1`, `top_p 0.95` | Thinking models can stall in the think phase at temperature 0. |
+| any other `deepseek*` / `qwen*` id | the same family defaults | Anti-loop insurance until a verified table row exists. The tile strips every field but the id from `/v1/models`, so family matching on the id is the only discovery available. |
+
+**These keys are spelled the way the OpenAI-compatible *wire* spells them** — `top_p`, not `topP`;
+`frequency_penalty`, not `frequencyPenalty`. That is not a style choice. opencode does not turn a
+model entry's `options` into AI SDK call settings; it merges them into the provider-options bag,
+and `@ai-sdk/openai-compatible` spreads every key of that bag it does not recognise **verbatim**
+into the `/chat/completions` JSON body (after, and therefore overriding, the fields it derived from
+call settings). A camelCase key therefore reaches vLLM as an unknown body field named `topP` and
+the sampler never sees it. Releases 0.2.3 and 0.2.4 shipped the camelCase spelling and the
+anti-loop options were inert for both; 0.4.0 fixes it. See the "PER-MODEL REQUEST OPTIONS" note at
+the top of `src/opencode-tanzu-capabilities.js` for the trace through opencode's source.
+
+The standalone V2 provider hid this. Its `applySamplingDefaults` rewrites
+`topP`/`frequencyPenalty`/`presencePenalty` to their wire names before forwarding and passes every
+other key through unchanged, so camelCase worked there and only there. Wire spelling is correct on
+both runtimes; camelCase was supported only by the standalone V2 rewrite.
+
+#### Overriding them: `OPENCODE_TANZU_MODEL_OPTIONS_JSON`
+
+Set a JSON object keyed by **served model id**; it merges over the bundled defaults **key by key**,
+so overriding one parameter keeps the rest. It is honoured by both the V1 config hook and the
+standalone V2 provider:
+
+```bash
+export OPENCODE_TANZU_MODEL_OPTIONS_JSON='{"deepseek-ai/DeepSeek-V4-Flash-0731":{"frequency_penalty":0.5}}'
+```
+
+Accepted keys and ranges (anything else is rejected — these values go straight onto the wire):
+
+| Key | Range |
+|---|---|
+| `temperature` | 0 – 2 |
+| `top_p` | 0 – 1 |
+| `top_k` | −1 – 100000, whole numbers (`-1` is vLLM's "disabled") |
+| `min_p` | 0 – 1 |
+| `frequency_penalty` | −2 – 2 |
+| `presence_penalty` | −2 – 2 |
+| `repetition_penalty` | 0.01 – 2 |
+| `seed` | whole numbers ≥ 0 |
+
+Behaviour is deliberately forgiving in one direction and strict in the other. An **unparseable**
+document is discarded whole and reported — half an operator's sampling intent is not a safer state
+than none of it. A well-formed document with one bad key keeps the good keys and logs why the bad
+one was dropped. An id the foundation does not serve is reported rather than silently ignored,
+because that is nearly always a typo. Nothing here can fail a startup.
+
+Configured options are logged once per model at startup. This confirms configuration,
+not receipt by the backend; request-level evidence is needed for that:
+
+```
+[tanzu] applied model options for deepseek-ai/DeepSeek-V4-Flash-0731: {"temperature":1,"top_p":0.95,"frequency_penalty":0.5}
+```
+
+### The loop-guard plugin lives in the buildpack, not here
+
+The companion `opencode-deepseek-guard.js` — which watches the event stream for repeated spans and
+either logs (`watch`) or interrupts (`interrupt`) a degenerating turn — is **not** shipped from this
+package, for three independent reasons:
+
+1. A plugin cannot register a sibling plugin. opencode's loader owns that, and this package's hooks
+   are `config`/`auth` on V1 and `setup` on V2.
+2. It is a **V2-format** plugin (`export default { id, setup(ctx) }`, using `ctx.event.subscribe`
+   and `ctx.session.interrupt`). On a V1 runtime opencode loads every `.js` in the plugin directory
+   and calls its default export as a factory, so a V2 object produces exactly the
+   `failed to load plugin … "Plugin export is not a function"` error that the no-op default export
+   in `opencode-tanzu-capabilities.js` exists to suppress.
+3. On the Cloud Foundry path the buildpack copies a fixed allowlist of this package's `src/` files
+   (`opencode-tanzu.js`, `-discovery.js`, `-cache.js`, `-capabilities.js`) and, for the V2 runtime,
+   stages them as a *package* directory with a single `main` — so a file added here would neither
+   be installed nor loaded there.
+
+It therefore lives in `opencode-buildpack` (`lib/opencode-deepseek-guard.js`), staged on the V2
+runtime only and gated by `OPENCODE_TANZU_LOOP_GUARD`. See that repo's "Tanzu AI Models
+integration" section.
+
 ### Caveat: a hand-pinned roster will be replaced
 
 The plugin's `config` hook sets `provider.tanzu.models` **unconditionally**: a hand-written
