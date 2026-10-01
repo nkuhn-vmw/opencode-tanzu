@@ -11,6 +11,7 @@ See [validation](validation-standalone-v2.md) for exactly what was tested.
 brew install nkuhn-vmw/tap/opencode-tanzu
 opencode-tanzu-install --runtime v2
 
+export OPENCODE_V2_BIN='/absolute/path/to/your/v2/opencode'
 export TANZU_GENAI_BASE_URL='https://genai-proxy.example.com/instance/openai/v1'
 export TANZU_GENAI_API_KEY_FILE="$HOME/.config/tanzu/api-key"
 opencode-tanzu-v2
@@ -28,12 +29,12 @@ commit the token or paste it into a command argument. The URL is the key's
 nested under `credentials`). The file contains only the raw key.
 
 Alternatively export `TANZU_GENAI_API_KEY` from your secret manager. If both
-are set, the token file wins. The stable V2 package names its binary `opencode`; keep it separate from V1
-and point `OPENCODE_V2_BIN` at that V2 executable. The beta package names it
-`opencode2`.
+are set, the token file wins. The stable V2 package names its binary `opencode`. Point `OPENCODE_V2_BIN`
+at the executable and confirm `opencode-tanzu-v2 --version` reports V2. The
+wrapper otherwise looks for `opencode2` on PATH. Do not assume an existing
+`opencode` executable is V2.
 
-V2 does not use V1's `providers login` flow or
-silently reuse V1's auth store. When migrating an existing install, back up and
+This plugin does not use V1's `providers login` flow. When migrating an existing install, back up and
 remove its old Tanzu connection in OpenCode's connection settings before using
 this native provider. V2 can migrate V1 auth metadata into its credential store;
 a saved remote `baseURL` then overrides the native loopback transport. Removing
@@ -113,7 +114,7 @@ Refreshes do not overlap. Failed refreshes retain the previous/configured
 catalog; an initial failure without configured models leaves no usable Tanzu
 models. A retained roster is not proof that authentication still works.
 Probing shares the bounded request budget and disk cache described in the
-[main README](../README.md#models), under the isolated V2 data root.
+[discovery reference](model-discovery.md), under the isolated V2 data root.
 
 Optionally set `OPENCODE_TANZU_MODEL` to a served model ID. It supplies a
 default only when the catalog has none; an explicit native `model` setting wins.
@@ -126,9 +127,9 @@ URL and key file through those options or environment variables, not native
 `providers.tanzu.settings`: V2 applies that native configuration after plugin
 activation, so it cannot supply this plugin's initial discovery credentials.
 The plugin rejects native requests that bypass its local transport. The
-config-only V1 fallback in the main README is a separate installation path.
+config-only V1 fallback in the [legacy guide](legacy-v1.md#no-plugin-at-all-the-config-only-fallback) is a separate installation path.
 
-The beta adapter removes only the runtime-generated `prompt_cache_key` from
+The native adapter removes only the runtime-generated `prompt_cache_key` from
 Tanzu chat requests. Explicit provider/model body overrides remain authoritative.
 The plugin starts an authenticated loopback forwarder inside the OpenCode
 process. Native V2 receives only its ephemeral local credential; the real
@@ -148,12 +149,23 @@ opencode-tanzu-v2 run --standalone --model 'tanzu/<served-model-id>' \
   'Do not use tools. Reply with exactly TANZU_OK.'
 ```
 
+After the fixed-text response succeeds, test a harmless tool operation:
+
+```bash
+opencode-tanzu-v2 run --standalone --model 'tanzu/<served-model-id>' \
+  'Use the shell tool to run printf TANZU_TOOL_OK. Report its output.'
+```
+
+Replace `<served-model-id>` with an ID from the listing. Confirm the tool was
+actually invoked and completed, rather than only narrated. Review permission
+prompts under your normal policy; this check should only print a marker.
+
 A model listing proves discovery, not inference. Verify a real response with
 your chosen model. If no models appear, check the V2 plugin install path,
 endpoint, token, CA trust and stderr. Activation may include up to about a
 minute of discovery/probing on a cold start. A 401 means refresh credentials;
 use your platform's approved service-key process or the
-[`octnz` launcher](https://github.com/nkuhn-vmw/opencode-on-tnz#opencode-v2--beta).
+[`octnz` launcher](https://github.com/nkuhn-vmw/opencode-on-tnz).
 This plugin never creates, deletes or rotates a CF service key itself.
 
 If plain `opencode2` cannot see the plugin, launch with `opencode-tanzu-v2`,
@@ -173,7 +185,8 @@ opencode-tanzu-install --runtime v2 --uninstall
 # Or: ./install.sh --runtime v2 --uninstall
 ```
 
-Restart active V2 processes after upgrading. Uninstall removes the selected
+Finish or pause active sessions, then restart the affected V2 processes after
+upgrading. Token-file rotation alone does not require a restart. Uninstall removes the selected
 runtime's plugin files only; config, credentials, cache, sessions and unrelated
 files remain. Add `--project` for a project installation. V1 users continue to
 use `opencode-tanzu-install --runtime v1` and their existing login workflow.
@@ -193,3 +206,19 @@ omitting its model sampling options. Use the native plugin and `providers`
 configuration. Do not paste the old V1 plugin into V2. No global trace logging
 is needed to validate sampling: observe selected numeric fields in one request
 without retaining headers or prompt bodies.
+
+## Troubleshooting by symptom
+
+| Symptom | Check first | Next step |
+| --- | --- | --- |
+| Wrapper rejects the runtime | `OPENCODE_V2_BIN` and `--version` | Select the V2 executable; 2.0.18 is verified. |
+| No Tanzu models | Endpoint, token file, CA trust and plugin scope | Read stderr; initial discovery failure does not invent a usable roster. |
+| Models list, but inference returns 401 | Token validity | Renew through the operator's approved process and replace the token file privately. |
+| Native transport/origin rejection | Native `providers.tanzu.settings` or migrated Tanzu credentials | Back up the old Tanzu connection and remove only its conflicting metadata. |
+| CLI works, desktop does not | Which backend the desktop uses | Connect to the configured backend and check its version; the wrapper uses separate XDG roots. |
+| Several local sessions stop together | Shared-service reload/restart time | Preserve session history and logs; a restart can interrupt every project using that service. |
+| Model narrates a tool call or sends malformed arguments | Actual tool events, model, history length, finish reason and sampling | Compare a fresh short session with the failing history; do not infer an AI Server bug from narration alone. |
+
+When filing a public issue, use the [safe evidence checklist](../CONTRIBUTING.md).
+Keep request logging narrowly scoped. Do not enable global prompt/header tracing
+merely to verify numeric sampling parameters.

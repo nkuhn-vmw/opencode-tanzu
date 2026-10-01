@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1] — 2026-10-01
+
+- Remove the process-wide setup guard so separate V2 project scopes register
+  their own provider/model hooks and transports.
+- Confirm native duplicate-entry handling with OpenCode 2.0.18.
+- Document migration of legacy Tanzu credential metadata that can override
+  the native transport, and the effect of shared-service restarts.
+
 ## [0.5.0] — 2026-10-01
 
 - Default installation to OpenCode V2, verified with 2.0.18; reject V1 runtime launches.
