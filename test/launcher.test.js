@@ -14,7 +14,7 @@ test('V2 launcher rejects V1 and isolates paths while preserving CLI arguments',
   const rejected=spawnSync('bash',[resolve('bin/opencode-tanzu-v2'),'run','hello'],{env,encoding:'utf8'})
   assert.equal(rejected.status,1)
   assert.match(rejected.stderr,/requires OpenCode V2/)
-  writeFileSync(runtime,'#!/usr/bin/env node\nif(process.argv[2]==="--version")console.log("2.0.18");else console.log(JSON.stringify({args:process.argv.slice(2),config:process.env.XDG_CONFIG_HOME,data:process.env.XDG_DATA_HOME}))\n',{mode:0o755})
+  writeFileSync(runtime,'#!/usr/bin/env node\nif(process.argv[2]==="--version")console.log("opencode v2.0.18");else console.log(JSON.stringify({args:process.argv.slice(2),config:process.env.XDG_CONFIG_HOME,data:process.env.XDG_DATA_HOME}))\n',{mode:0o755})
   const accepted=spawnSync('bash',[resolve('bin/opencode-tanzu-v2'),'run','hello world'],{env,encoding:'utf8'})
   assert.equal(accepted.status,0,accepted.stderr)
   const x=JSON.parse(accepted.stdout)
