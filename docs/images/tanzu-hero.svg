@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="560" viewBox="0 0 1600 560" role="img" aria-labelledby="title desc">
+<title id="title">OpenCode connected to Tanzu models</title>
+<desc id="desc">Architecture illustration: an agent workspace connects through a native provider to a cluster of model services.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#07111f"/><stop offset="1" stop-color="#0b1730"/></linearGradient><linearGradient id="line"><stop stop-color="#00d4ff"/><stop offset="1" stop-color="#7c5cff"/></linearGradient><radialGradient id="glow"><stop stop-color="#00d4ff" stop-opacity=".16"/><stop offset="1" stop-color="#00d4ff" stop-opacity="0"/></radialGradient></defs>
+<rect width="1600" height="560" rx="24" fill="url(#bg)"/><ellipse cx="800" cy="280" rx="650" ry="265" fill="url(#glow)"/>
+<g fill="none" stroke="#20314b" opacity=".6"><path d="M0 140H1600M0 420H1600M240 0V560M1360 0V560"/><path d="M0 280H1600" stroke-dasharray="4 12"/></g>
+<g fill="none" stroke="url(#line)" stroke-width="3"><path d="M590 280H710M890 280H990M990 280V160H1090M990 280H1090M990 280V400H1090"/></g>
+<rect x="280" y="150" width="310" height="260" rx="22" fill="#0c1c30" stroke="#00d4ff" stroke-opacity=".65" stroke-width="2"/>
+<g fill="none" stroke="#45e0bd" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"><path d="m345 243 40 37-40 37M413 320h78"/></g>
+<g fill="#203b50"><rect x="317" y="179" width="105" height="8" rx="4"/><rect x="317" y="370" width="170" height="8" rx="4"/></g><circle cx="545" cy="182" r="6" fill="#ffca69"/>
+<rect x="710" y="210" width="180" height="140" rx="28" fill="#14223d" stroke="#7c5cff" stroke-width="2"/><g fill="none" stroke="#00d4ff" stroke-width="5" stroke-linecap="round"><path d="M765 255h70v50h-70zM752 270h13M752 290h13M835 270h13M835 290h13M782 242v13M818 242v13M782 305v13M818 305v13"/></g>
+<g fill="#0c1c30" stroke="#45e0bd" stroke-opacity=".6" stroke-width="2"><rect x="1090" y="112" width="230" height="96" rx="18"/><rect x="1090" y="232" width="230" height="96" rx="18"/><rect x="1090" y="352" width="230" height="96" rx="18"/></g>
+<g fill="none" stroke="#7c5cff" stroke-width="3"><path d="m1130 142 18 18-18 18 18-18h45M1130 262l18 18-18 18 18-18h45M1130 382l18 18-18 18 18-18h45"/></g>
+<g fill="#45e0bd"><circle cx="1284" cy="160" r="6"/><circle cx="1284" cy="280" r="6"/><circle cx="1284" cy="400" r="6"/></g>
+</svg>
