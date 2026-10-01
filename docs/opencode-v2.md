@@ -1,6 +1,6 @@
 # Tanzu models in standalone OpenCode V2
 
-Plugin 0.5.0 supplies a native V2 provider without a Cloud Foundry buildpack.
+Plugin 0.5.1 supplies a native V2 provider without a Cloud Foundry buildpack.
 It shares V1 discovery, capability metadata, probing and caching, but has a
 separate entry point. The verified runtime is OpenCode **2.0.18**.
 See [validation](validation-standalone-v2.md) for exactly what was tested.
@@ -33,7 +33,19 @@ and point `OPENCODE_V2_BIN` at that V2 executable. The beta package names it
 `opencode2`.
 
 V2 does not use V1's `providers login` flow or
-silently reuse V1's auth store. It reads the token file on discovery and on each
+silently reuse V1's auth store. When migrating an existing install, back up and
+remove its old Tanzu connection in OpenCode's connection settings before using
+this native provider. V2 can migrate V1 auth metadata into its credential store;
+a saved remote `baseURL` then overrides the native loopback transport. Removing
+only `auth.json` does not remove an already migrated V2 credential. Keep the token
+in the private token file and retain the backup for rollback. Do not remove
+credentials belonging to other integrations.
+
+The background service is shared by all local projects. Reloads and service
+restarts can interrupt active sessions and shell jobs. Migrate while those
+sessions are idle; test changes with `--standalone` first.
+
+The native provider reads the token file on discovery and on each
 inference request, allowing rotation without a restart. A missing/unreadable
 file fails the operation; no credentials are printed or generated into config.
 
@@ -168,7 +180,7 @@ use `opencode-tanzu-install --runtime v1` and their existing login workflow.
 
 ## Sampling defaults and overrides
 
-Version 0.5.0 registers providers through `ctx.provider.transform` and models
+Version 0.5.1 registers providers through `ctx.provider.transform` and models
 through `ctx.model.transform`. It puts verified numeric sampling defaults in
 the native model `body`; it does not rely on legacy `provider.models.options`.
 The effective precedence is defaults, operator environment defaults, provider

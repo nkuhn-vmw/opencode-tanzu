@@ -98,8 +98,20 @@ test('native setup registers standalone provider, honors operator limits, and sc
     assert.deepEqual(result.variants, configured.variants)
     assert.equal(result.enabled, false)
     assert.equal(result.status, 'deprecated')
-    assert.equal(await plugin.setup({ options: {}, session: { hook: () => assert.fail('duplicate hook') } }), undefined)
-    await assert.rejects(() => plugin.setup({ options: { baseURL: 'https://different.test/service/openai/v1' } }), /Multiple Tanzu/)
+    // Separate projects must register separate transforms and transports.
+    let otherHookCount = 0, otherProvider, otherResult, otherTransform, otherProviderTransform
+    const otherProviderEditor = { get: () => ({ provider: providerInput, models: new Map([[id, configured]]) }),
+      update: (_, fn) => { otherProvider = { ...providerInput }; fn(otherProvider) } }
+    const otherEditor = { ...editor, provider: { get: () => ({ provider: otherProvider }) },
+      update: (_, __, fn) => { otherResult = structuredClone(configured); fn(otherResult) } }
+    const otherCleanup = await plugin.setup({ options: {},
+      provider: { transform: async fn => { otherProviderTransform = fn }, reload: async () => otherProviderTransform(otherProviderEditor) },
+      model: { transform: async fn => { otherTransform = fn }, reload: async () => otherTransform(otherEditor), list: async () => ({ data: [] }) },
+      session: { hook: async () => { otherHookCount++ } } })
+    assert.equal(otherHookCount, 1)
+    assert.notEqual(otherProvider.settings.baseURL, provider.settings.baseURL)
+    assert.deepEqual(otherResult.body, result.body)
+    otherCleanup()
     await model.reload()
     assert.deepEqual(result.body, { temperature: 0.2, top_p: 0.8, frequency_penalty: 0.5 })
     const event = { model: { providerID: 'tanzu', id }, request: new Request(baseURL + '/chat/completions', { method: 'POST', headers: {authorization:'Bearer tanzu-runtime-credential'}, body: '{}' }) }
