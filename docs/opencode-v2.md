@@ -1,8 +1,8 @@
-# Tanzu models in standalone OpenCode V2 / beta
+# Tanzu models in standalone OpenCode V2
 
-Plugin 0.3.0 adds a native V2 provider without a Cloud Foundry buildpack.
+Plugin 0.5.0 supplies a native V2 provider without a Cloud Foundry buildpack.
 It shares V1 discovery, capability metadata, probing and caching, but has a
-separate entry point. Tested runtimes are OpenCode **2.0.3** and **0.0.0-beta-19425**.
+separate entry point. The verified runtime is OpenCode **2.0.18**.
 See [validation](validation-standalone-v2.md) for exactly what was tested.
 
 ## Homebrew
@@ -165,3 +165,19 @@ Restart active V2 processes after upgrading. Uninstall removes the selected
 runtime's plugin files only; config, credentials, cache, sessions and unrelated
 files remain. Add `--project` for a project installation. V1 users continue to
 use `opencode-tanzu-install --runtime v1` and their existing login workflow.
+
+## Sampling defaults and overrides
+
+Version 0.5.0 registers providers through `ctx.provider.transform` and models
+through `ctx.model.transform`. It puts verified numeric sampling defaults in
+the native model `body`; it does not rely on legacy `provider.models.options`.
+The effective precedence is defaults, operator environment defaults, provider
+`body`, model `body`, then the selected variant `body`. A zero or null explicit
+field wins. `OPENCODE_TANZU_MODEL_OPTIONS_JSON` changes defaults, not explicit
+body overrides. The shared converter is also used by the CF V2 buildpack.
+
+A legacy `provider` config can still appear to work in OpenCode 2.0.18 while
+omitting its model sampling options. Use the native plugin and `providers`
+configuration. Do not paste the old V1 plugin into V2. No global trace logging
+is needed to validate sampling: observe selected numeric fields in one request
+without retaining headers or prompt bodies.

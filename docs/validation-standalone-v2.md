@@ -1,3 +1,26 @@
+# OpenCode V2 validation
+
+## 0.5.0 / OpenCode 2.0.18 — 2026-10-01
+
+- 154 existing/focused Node checks pass, including token rotation, redirect
+  rejection, native API registration, duplicate setup, override precedence,
+  refresh composition, installer isolation and V1 runtime rejection.
+- A real isolated 2.0.18 process returned a fixed completion through the
+  authenticated token-file transport. Scoped request metadata confirmed
+  DeepSeek temperature 1, top_p 0.95 and frequency_penalty 0.5.
+- Provider top_p 0.8, model frequency_penalty 0.4 and selected-variant
+  temperature 0.2 reached the real request. Explicit zero model/variant values
+  also reached the request. A shell `printf` completed and returned its marker.
+- A model configured with only a body retained the discovered context 262144,
+  output 32768 and text/tool capabilities, rather than native generic defaults.
+- Independent read-only review: Claude Opus 5.5 (`claude-opus-5-5`).
+
+This validates the local native integration and short tool flow. It does not
+prove every model is reliable in long sessions, force a changing discovery
+source on refresh, or substitute for CF buildpack deployment validation.
+
+## Historical validation
+
 # Standalone V2 validation — 2026-09-14
 
 ## Verified locally

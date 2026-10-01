@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import plugin, { connection, refreshInterval, toV2Model, omitUnsupportedPromptCacheKey, applySamplingDefaults } from '../src/opencode-tanzu-v2.js'
+import plugin, { connection, refreshInterval, toV2Model, omitUnsupportedPromptCacheKey, mergeV2Model } from '../src/opencode-tanzu-v2.js'
 
 const baseURL = 'https://example.test/service/openai/v1'
 test('V2 connection validates endpoint and supports rotated token files', () => {
@@ -54,10 +54,10 @@ test('native setup registers standalone provider, honors operator limits, and sc
   process.env.XDG_DATA_HOME = data
   process.env.TANZU_GENAI_BASE_URL = baseURL
   process.env.TANZU_GENAI_API_KEY = 'secret-sentinel'
-  let transform, hook, cleanup
+  let transform, providerTransform, hook, cleanup
   let provider
   let result
-  const id = 'fixture-chat'
+  const id = 'deepseek-ai/DeepSeek-V4-Flash-0731'
   globalThis.fetch = async (url, init) => {
     assert.equal(init.redirect, 'error')
     if (url.endsWith('/models')) return Response.json({ data: [{ id }] })
@@ -65,24 +65,43 @@ test('native setup registers standalone provider, honors operator limits, and sc
     if (body.max_tokens > 100000) return Response.json({ error: { message: 'max_model_len=32768' } }, { status: 400 })
     return Response.json({ error: { message: 'does not support tools' } }, { status: 400 })
   }
-  const catalog = {
-    provider: { get: () => undefined, update: (_, fn) => { provider = {}; fn(provider) } },
-    model: {
-      get: () => ({ limit: { context: 16000, output: 2000 }, body: { temperature: 0.2 } }),
-      update: (_, __, fn) => { result = {}; fn(result) },
-      default: { get: () => ({ providerID: 'other', modelID: 'keep' }), set: () => assert.fail('overwrote default') },
-    },
+  const configured = { limit: { context: 16000, output: 2000 }, body: { temperature: 0.2 }, enabled: false, status: 'deprecated', variants: [{ id: 'precise', body: { frequency_penalty: 0 } }] }
+  const providerInput = { package: '@opencode/ai/providers/openai-compatible', body: { top_p: 0.8 } }
+  const providerEditor = {
+    get: () => ({ provider: providerInput, models: new Map([[id, configured]]) }),
+    update: (_, fn) => { provider = { ...providerInput }; fn(provider) },
+  }
+  const editor = {
+    provider: { get: () => ({ provider }) },
+    get: () => configured,
+    update: (_, __, fn) => { result = structuredClone(configured); fn(result) },
+    default: { get: () => ({ providerID: 'other', modelID: 'keep' }), set: () => assert.fail('overwrote default') },
+  }
+  const model = {
     transform: async fn => { transform = fn },
-    reload: async () => transform(catalog),
+    reload: async () => transform(editor),
+    list: async () => ({ data: [{ ...result, id, providerID: 'tanzu' }] }),
+  }
+  const providers = {
+    transform: async fn => { providerTransform = fn },
+    reload: async () => providerTransform(providerEditor),
   }
   try {
-    cleanup = await plugin.setup({ options: {}, catalog, session: { hook: async (_, fn) => { hook = fn } } })
+    cleanup = await plugin.setup({ options: {}, provider: providers, model, session: { hook: async (_, fn) => { hook = fn } } })
     assert.equal(provider.package, '@opencode/ai/providers/openai-compatible')
     assert.match(provider.settings.baseURL, /^http:\/\/127\.0\.0\.1:/)
     assert.notEqual(provider.settings.apiKey, 'secret-sentinel')
     assert.equal(JSON.stringify(provider).includes('secret-sentinel'), false)
     assert.deepEqual(result.limit, { context: 16000, output: 2000 })
     assert.equal(result.family, id)
+    assert.deepEqual(result.body, { temperature: 0.2, top_p: 0.8, frequency_penalty: 0.5 })
+    assert.deepEqual(result.variants, configured.variants)
+    assert.equal(result.enabled, false)
+    assert.equal(result.status, 'deprecated')
+    assert.equal(await plugin.setup({ options: {}, session: { hook: () => assert.fail('duplicate hook') } }), undefined)
+    await assert.rejects(() => plugin.setup({ options: { baseURL: 'https://different.test/service/openai/v1' } }), /Multiple Tanzu/)
+    await model.reload()
+    assert.deepEqual(result.body, { temperature: 0.2, top_p: 0.8, frequency_penalty: 0.5 })
     const event = { model: { providerID: 'tanzu', id }, request: new Request(baseURL + '/chat/completions', { method: 'POST', headers: {authorization:'Bearer tanzu-runtime-credential'}, body: '{}' }) }
     await assert.rejects(() => hook(event), /Configure Tanzu connection/)
     assert.notEqual(event.request.headers.get('authorization'), 'Bearer secret-sentinel')
@@ -96,8 +115,10 @@ test('native setup registers standalone provider, honors operator limits, and sc
   }
 })
 
-test('sampling defaults preserve explicit provider/model and variant body overrides', async () => {
-  const event = { request: new Request(baseURL+'/chat/completions',{method:'POST',body:JSON.stringify({temperature:0})}) }
-  await applySamplingDefaults(event,{temperature:1,topP:0.95,frequencyPenalty:0.5},{body:{temperature:0},variants:[{id:'unused',body:{top_p:0.8}}]})
-  assert.deepEqual(await event.request.json(),{temperature:0,top_p:0.95,frequency_penalty:0.5})
+test('native model bodies preserve provider and model overrides without mutating defaults', () => {
+  const defaults = { name: 'DeepSeek', tool_call: true, limit: { context: 32768, output: 4096 }, options: { temperature: 1, top_p: 0.95, frequency_penalty: 0.5 } }
+  const merged = mergeV2Model('deepseek', defaults, 123, { body: { frequency_penalty: 0, temperature: null } }, { body: { top_p: 0.8, temperature: 0.2 } })
+  assert.deepEqual(merged.body, { temperature: null, top_p: 0.8, frequency_penalty: 0 })
+  assert.deepEqual(defaults.options, { temperature: 1, top_p: 0.95, frequency_penalty: 0.5 })
+  assert.equal(merged.time.released, 123)
 })

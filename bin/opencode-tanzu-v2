@@ -5,4 +5,13 @@ export XDG_CONFIG_HOME="${OPENCODE_TANZU_V2_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOM
 export XDG_DATA_HOME="${OPENCODE_TANZU_V2_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-tanzu-v2}"
 export XDG_CACHE_HOME="${OPENCODE_TANZU_V2_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/opencode-tanzu-v2}"
 export XDG_STATE_HOME="${OPENCODE_TANZU_V2_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/opencode-tanzu-v2}"
-exec "${OPENCODE_V2_BIN:-opencode2}" "$@"
+runtime="${OPENCODE_V2_BIN:-opencode2}"
+version="$("$runtime" --version 2>/dev/null)" || {
+  echo "opencode-tanzu-v2: cannot run $runtime; install OpenCode 2.0.18 and set OPENCODE_V2_BIN" >&2
+  exit 1
+}
+case "$version" in
+  2.*) ;;
+  *) echo "opencode-tanzu-v2: requires OpenCode V2 (tested 2.0.18), got $version" >&2; exit 1 ;;
+esac
+exec "$runtime" "$@"

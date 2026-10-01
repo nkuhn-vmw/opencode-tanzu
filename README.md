@@ -16,8 +16,8 @@ artifact — there is nothing to build and no package manager in the install pat
   data egress; the agent's brain runs on your own Cloud Foundry foundation.
 - **Live roster discovery**: models are discovered from your foundation's `/v1/models` on every
   start, so the picker tracks tile roster changes automatically.
-- A **V1 login flow** (`opencode providers login -p tanzu`) that validates credentials before
-  saving them, and **V2 token-file authentication** with credentials reread for each request.
+- **V2 token-file authentication**, with credentials reread for each request; an explicit
+  legacy V1 entry point remains available for existing installations.
 - **No secrets in your config file** — V1 saves the API key in a `0600` file under its data
   directory; V2 uses your private token file or a secret supplied through the environment.
 
@@ -25,12 +25,12 @@ artifact — there is nothing to build and no package manager in the install pat
 
 | Runtime | Install | Launch / authenticate |
 | --- | --- | --- |
-| OpenCode V1 | `opencode-tanzu-install --runtime v1` (default) | `opencode providers login -p tanzu`, then `opencode` |
-| OpenCode V2 / beta | `opencode-tanzu-install --runtime v2` | Set Tanzu environment variables, then `opencode-tanzu-v2` |
+| Legacy OpenCode V1 | `opencode-tanzu-install --runtime v1` | `opencode providers login -p tanzu`, then `opencode` |
+| OpenCode V2 (default) | `opencode-tanzu-install` | Set Tanzu environment variables, then `opencode-tanzu-v2` |
 
-V2 support starts in plugin **0.3.0** and supports the native plugin API in
-OpenCode **2.0.3** and **0.0.0-beta-19425**. Beta APIs can change; other snapshots require
-verification. Stable V2 and the tested beta use the same native adapter.
+Current V2 support starts in plugin **0.5.0** and supports the native plugin API in
+OpenCode **2.0.18**. Beta APIs can change; other snapshots require
+verification. The old pre-GA catalog API is not supported by this release.
 The installer does not install OpenCode itself. Install your chosen runtime
 separately; the V2 wrapper uses `opencode2` on PATH or `OPENCODE_V2_BIN`.
 
@@ -39,13 +39,44 @@ credential rotation, native config, troubleshooting and validation instructions.
 No buildpack, `VCAP_SERVICES`, CF application or platform deployment is required.
 You need a reachable Tanzu endpoint and its service-key credentials.
 
+## Recommended: OpenCode V2
+
+OpenCode **2.0.18** is the verified runtime. Version **0.5.0** uses its native
+`ctx.provider` and `ctx.model` APIs. The installer defaults to V2:
+
+```bash
+brew install nkuhn-vmw/tap/opencode-tanzu
+opencode-tanzu-install
+export OPENCODE_V2_BIN=/absolute/path/to/opencode-v2
+export TANZU_GENAI_BASE_URL=https://example.com/instance/openai/v1
+export TANZU_GENAI_API_KEY_FILE=/absolute/path/to/private/token
+opencode-tanzu-v2
+```
+
+The token file contains the raw service-key token, with mode 0600 in a private
+0700 directory. The native transport reads it for each request, including after
+rotation. The real token is absent from the native model catalog and generated
+configuration. Desktop clients must connect to this backend or configure the
+native plugin in their embedded V2 backend; installing a plugin in a separate
+XDG root does not update an already-running Desktop service.
+
+Sampling defaults are serialized as native model `body` fields. Precedence is
+bundled defaults, operator environment defaults, provider `body`, model `body`,
+then the selected variant `body`. Zero and null overrides are retained. The
+same converter is consumed by the Cloud Foundry V2 buildpack. Startup logs show
+configured defaults; an actual request capture is required to prove wire values.
+
+See [the V2 guide](docs/opencode-v2.md) for installation, token rotation,
+configuration and troubleshooting. V1 material below is retained only for
+legacy installations; new deployments use V2.
+
 ## Install (V1)
 
 Via Homebrew:
 
 ```bash
 brew install nkuhn-vmw/tap/opencode-tanzu
-opencode-tanzu-install
+opencode-tanzu-install --runtime v1
 ```
 
 If current Homebrew reports an untrusted community tap, review the
@@ -57,16 +88,16 @@ Or from a clone:
 
 ```bash
 git clone https://github.com/nkuhn-vmw/opencode-tanzu.git
-cd opencode-tanzu && ./install.sh
+cd opencode-tanzu && ./install.sh --runtime v1
 ```
 
 Both do the same thing: copy the four V1 JavaScript files into opencode's global plugin directory
 (`${XDG_CONFIG_HOME:-~/.config}/opencode/plugins/`), where opencode auto-loads them at startup.
-Update with `brew upgrade opencode-tanzu && opencode-tanzu-install` (or `git pull &&
-./install.sh`); remove with `opencode-tanzu-install --uninstall` (or `./install.sh
+Update with `brew upgrade opencode-tanzu && opencode-tanzu-install --runtime v1` (or `git pull &&
+./install.sh --runtime v1`); remove with `opencode-tanzu-install --runtime v1 --uninstall` (or `./install.sh --runtime v1
 --uninstall`).
 
-Prefer per-project? `./install.sh --project` installs into `./.opencode/plugins/` of the current
+Prefer per-project? `./install.sh --runtime v1 --project` installs into `./.opencode/plugins/` of the current
 directory instead.
 
 <details>
