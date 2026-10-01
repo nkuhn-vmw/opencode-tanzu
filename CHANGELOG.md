@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0] — 2026-10-01
+
+- Default installation to OpenCode V2, verified with 2.0.18; reject V1 runtime launches.
+- Register native providers/models through the supported V2 APIs instead of the removed catalog API.
+- Share native model-body conversion with the CF buildpack; provider/model/selected variant overrides retain precedence over sampling defaults.
+- Remove the sampling request hook that could overwrite explicit provider body values. Keep the token-file transport, credential rotation, served limits, visibility and bounded discovery.
+
+
 ## [0.4.1] — 2026-09-18
 
 - Do not echo rejected nonnumeric sampling-option values in diagnostics.

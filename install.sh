@@ -5,7 +5,7 @@
 # V2 uses a native plugin directory and an isolated launcher. No npm,
 # network download or build step is required.
 #
-#   ./install.sh              V1 install / update (idempotent)
+#   ./install.sh              V2 install / update (idempotent)
 #   ./install.sh --runtime v2  native V2 install / update
 #   ./install.sh --uninstall  remove the plugin files
 #   ./install.sh --project    install into ./.opencode/plugins of the CWD
@@ -20,7 +20,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES=(opencode-tanzu.js opencode-tanzu-capabilities.js opencode-tanzu-discovery.js opencode-tanzu-cache.js)
 
-RUNTIME="v1"
+RUNTIME="v2"
 PROJECT=0
 MODE="install"
 TARGET_BASE="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
@@ -37,7 +37,7 @@ done
 if [[ "$RUNTIME" == v2 ]]; then
   TARGET_BASE="${OPENCODE_TANZU_V2_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode-tanzu-v2}/opencode/plugins/opencode-tanzu-v2"
   [[ "$PROJECT" == 0 ]] || TARGET_BASE="$PWD/.opencode/plugins/opencode-tanzu-v2"
-  FILES+=(opencode-tanzu-v2.js opencode-tanzu-transport.js)
+  FILES+=(opencode-tanzu-v2.js opencode-tanzu-transport.js opencode-tanzu-v2-model.js)
 else
   [[ "$PROJECT" == 0 ]] || TARGET_BASE="$PWD/.opencode/plugins"
 fi
@@ -95,6 +95,6 @@ Next steps:
   3. Check the roster:
        opencode models tanzu
 
-To update: git pull && ./install.sh
-To remove: ./install.sh --uninstall
+To update: git pull && ./install.sh --runtime v1
+To remove: ./install.sh --runtime v1 --uninstall
 EOF

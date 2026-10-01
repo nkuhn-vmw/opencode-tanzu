@@ -11,11 +11,11 @@ test('install, upgrade and uninstall isolate runtimes and preserve unrelated fil
   delete env.OPENCODE_TANZU_V2_CONFIG_HOME
   const run = (...args) => spawnSync('bash', [installer, ...args], { env, encoding: 'utf8' })
   try {
-    assert.equal(run().status, 0)
+    assert.equal(run('--runtime','v1').status, 0)
     const v1 = join(env.XDG_CONFIG_HOME, 'opencode/plugins/opencode-tanzu.js')
     const v2 = join(env.XDG_CONFIG_HOME, 'opencode-tanzu-v2/opencode/plugins/opencode-tanzu-v2')
     assert.ok(existsSync(v1))
-    assert.equal(run('--runtime','v2').status, 0)
+    assert.equal(run().status, 0)
     assert.match(readFileSync(join(v2,'index.js'),'utf8'), /opencode-tanzu-v2/)
     writeFileSync(join(v2, 'unrelated.txt'), 'keep')
     assert.equal(run('--runtime','v2').status, 0)

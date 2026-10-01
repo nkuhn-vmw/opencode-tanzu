@@ -6,9 +6,10 @@ import { applyModelOptionsFromEnv, enrichUnknownCards, PROBE_PHASE_BUDGET_MS } f
 
 const PROVIDER_ID = "tanzu"
 import { createTransport } from "./opencode-tanzu-transport.js"
+const ACTIVE = Symbol.for("opencode.tanzu.v2.active")
 const PACKAGE = "@opencode/ai/providers/openai-compatible"
 
-export function connection(options = {}, env = process.env) {
+export function endpoint(options = {}, env = process.env) {
   const raw = options.baseURL ?? env.TANZU_GENAI_BASE_URL
   if (!raw) return undefined
   const baseURL = String(raw).trim().replace(/\/+$/, "")
@@ -16,6 +17,12 @@ export function connection(options = {}, env = process.env) {
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || !url.pathname.endsWith("/openai/v1")) {
     throw new Error("Tanzu URL must use HTTPS, end in /openai/v1, and contain no credentials, query or fragment")
   }
+  return baseURL
+}
+
+export function connection(options = {}, env = process.env) {
+  const baseURL = endpoint(options, env)
+  if (!baseURL) return undefined
   const file = options.apiKeyFile ?? env.TANZU_GENAI_API_KEY_FILE
   // Read on every refresh/request so octnz token rotation works without restarting.
   const apiKey = String((file ? readFileSync(file, "utf8") : env.TANZU_GENAI_API_KEY) ?? "").trim()
@@ -28,13 +35,8 @@ export function refreshInterval(value) {
   return Number.isFinite(n) && n > 0 ? Math.max(30_000, Math.min(3_600_000, n)) : 300_000
 }
 
-export function toV2Model(id, model, released = Date.now()) {
-  return {
-    modelID: id, name: model.name, family: model.family ?? id,
-    capabilities: { tools: model.tool_call === true, input: model.modalities?.input ?? ["text"], output: model.modalities?.output ?? ["text"] },
-    limit: model.limit, status: "active", time: { released },
-  }
-}
+export { toV2Model, mergeV2Model } from "./opencode-tanzu-v2-model.js"
+import { mergeV2Model } from "./opencode-tanzu-v2-model.js"
 
 export async function discoverCatalog(baseURL, apiKey) {
   const cards = await discoverModels(baseURL, apiKey)
@@ -50,7 +52,7 @@ export async function discoverCatalog(baseURL, apiKey) {
   }
   // Same operator override the V1 config hook honours, applied here so a
   // standalone V2 install and a V1 install put identical sampling parameters on
-  // the wire. `applySamplingDefaults` below reads these `options` per model.
+  // the wire. shared model conversion below carries these `options` into each native model body.
   applyModelOptionsFromEnv(models)
   return models
 }
@@ -83,79 +85,80 @@ export async function omitUnsupportedPromptCacheKey(event, config = {}) {
 }
 
 
-export async function applySamplingDefaults(event, options, model) {
-  if (!options || event.request.method !== "POST") return
-  const body = await event.request.clone().json()
-  const overrides = [model?.body, ...(model?.variants ?? []).filter((variant) => variant.id === event.model?.variant).map((variant) => variant.body)]
-  for (const [key, value] of Object.entries(options)) {
-    const wire = { topP: "top_p", frequencyPenalty: "frequency_penalty", presencePenalty: "presence_penalty" }[key] ?? key
-    if (!overrides.some((override) => override && Object.hasOwn(override, wire))) body[wire] = value
-  }
-  const headers = new Headers(event.request.headers)
-  headers.delete("content-length")
-  event.request = new Request(event.request, { headers, body: JSON.stringify(body) })
-}
-
 export default {
   id: "opencode.provider.tanzu",
   setup: async (ctx) => {
     const options = ctx.options ?? {}
+    const identity = JSON.stringify([endpoint(options), options.apiKeyFile ?? process.env.TANZU_GENAI_API_KEY_FILE, options.model ?? process.env.OPENCODE_TANZU_MODEL, options.refreshIntervalMs ?? process.env.OPENCODE_TANZU_REFRESH_INTERVAL_MS])
+    if (globalThis[ACTIVE]) {
+      if (globalThis[ACTIVE].identity !== identity) throw new Error("Multiple Tanzu V2 plugin configurations; keep one native provider connection")
+      return
+    }
+    const owner = { identity }
+    globalThis[ACTIVE] = owner
+    const release = () => { if (globalThis[ACTIVE] === owner) delete globalThis[ACTIVE] }
     // Read configured state from the editor, never the public catalog API:
     // the editor supplies a synchronous snapshot during catalog composition.
     let configured
-    let settings = {}
     let configuredModels = new Map()
     let enabled = true
-    const transport = await createTransport(() => connection(options))
+    let transport
+    try { transport = await createTransport(() => connection(options)) }
+    catch (error) { release(); throw error }
     let models = {}
     let released = Date.now()
     let stopped = false
     let running = false
 
     try {
+    if (!ctx.provider?.transform || !ctx.model?.transform) {
+      throw new Error("Tanzu native provider requires OpenCode 2.0.18 provider/model APIs")
+    }
     await ctx.session.hook("http.request", async (event) => {
       if (event.model?.providerID !== PROVIDER_ID) return
-      const current = ctx.catalog.model.list
-        ? (await ctx.catalog.model.list()).data.find((model) => model.providerID === PROVIDER_ID && model.id === event.model.id)
-        : configuredModels.get(event.model.id)
+      const current = (await ctx.model.list()).data.find((model) => model.providerID === PROVIDER_ID && model.id === event.model.id)
+        ?? configuredModels.get(event.model.id)
       if (current?.package && current.package !== PACKAGE) return
       if (new URL(event.request.url).origin !== new URL(transport.baseURL).origin) {
         throw new Error("Configure Tanzu connection via plugin options or TANZU_GENAI_* variables, not providers.tanzu.settings")
       }
       await omitUnsupportedPromptCacheKey(event, { providers: { tanzu: { ...configured, models: { [event.model.id]: current } } } })
-      await applySamplingDefaults(event, models[event.model.id]?.options, current)
-
     }, { providerID: PROVIDER_ID })
 
-    await ctx.catalog.transform((catalog) => {
-      const record = catalog.provider.get(PROVIDER_ID)
+    await ctx.provider.transform((editor) => {
+      const record = editor.get(PROVIDER_ID)
       configured = record?.provider ? { ...record.provider } : undefined
       configuredModels = new Map(record?.models ?? [])
-      settings = configured?.settings ?? {}
       enabled = configured?.activation !== "disabled" && (!configured?.package || configured.package === PACKAGE)
-      if (!enabled || !connection(options)) return
-      catalog.provider.update(PROVIDER_ID, (draft) => {
+      if (!enabled || !endpoint(options)) return
+      editor.update(PROVIDER_ID, (draft) => {
         draft.name = configured?.name ?? "Tanzu Platform"
         draft.package = PACKAGE
-        // The native client receives only a loopback credential, never the
-        // foundation key. The forwarder enforces redirect rejection.
-        draft.settings = { ...settings, apiKey: transport.apiKey, baseURL: transport.baseURL }
+        // Only an ephemeral localhost credential reaches the native catalog.
+        draft.settings = { ...configured?.settings, apiKey: transport.apiKey, baseURL: transport.baseURL }
       })
+    })
+
+    await ctx.model.transform((editor) => {
+      if (!enabled) return
+      const provider = editor.provider.get(PROVIDER_ID)?.provider ?? configured ?? {}
       for (const [id, model] of Object.entries(models)) {
-        const current = catalog.model.get(PROVIDER_ID, id)
-        const existing = current ? { ...current } : undefined
-        const converted = toV2Model(id, model, released)
-        // Existing configured models are operator-owned. Fill catalog visibility
-        // and preserve their settings, capabilities and positive limit overrides.
-        const limit = { ...converted.limit }
-        for (const key of ["context", "output"]) {
-          if (existing?.limit?.[key] > 0) limit[key] = existing.limit[key]
-        }
-        limit.output = Math.min(limit.output, limit.context)
-        catalog.model.update(PROVIDER_ID, id, (draft) => Object.assign(draft, converted, existing ?? {}, { limit, family: existing?.family || converted.family, time: converted.time }))
+        editor.update(PROVIDER_ID, id, (draft) => {
+          const explicit = configuredModels.get(id) ?? {}
+          const converted = mergeV2Model(id, model, released, draft, provider)
+          for (const key of ["name", "capabilities", "status", "enabled", "family"]) {
+            if (Object.hasOwn(explicit, key) && !(key === "name" && explicit[key] === id)) converted[key] = explicit[key]
+          }
+          const limit = { ...converted.limit }
+          for (const key of ["context", "output"]) {
+            if (explicit.limit?.[key] > 0) limit[key] = explicit.limit[key]
+          }
+          limit.output = Math.min(limit.output, limit.context)
+          Object.assign(draft, converted, { limit, family: draft.family || converted.family })
+        })
       }
       const selected = options.model ?? process.env.OPENCODE_TANZU_MODEL
-      if (!catalog.model.default.get() && selected && models[selected]) catalog.model.default.set(PROVIDER_ID, selected)
+      if (!editor.default.get() && selected && models[selected]) editor.default.set(PROVIDER_ID, selected)
     })
 
     const refresh = async () => {
@@ -168,18 +171,19 @@ export default {
         if (stopped) return
         models = next
         released = Date.now()
-        await ctx.catalog.reload()
+        await ctx.model.reload()
       } catch {
         // Do not log remote response bodies, token-file contents or API keys.
         console.error("[tanzu-v2] discovery failed; retaining previous/configured models. Check URL, credentials and network.")
       } finally { running = false }
     }
-    await ctx.catalog.reload()
-    if (!enabled || !connection(options)) { transport.close(); return }
+    await ctx.provider.reload()
+    await ctx.model.reload()
+    if (!enabled || !endpoint(options)) { transport.close(); release(); return }
     await refresh()
     const timer = setInterval(() => void refresh(), refreshInterval(options.refreshIntervalMs ?? process.env.OPENCODE_TANZU_REFRESH_INTERVAL_MS))
     timer.unref?.()
-    return () => { stopped = true; clearInterval(timer); transport.close() }
-    } catch (error) { transport.close(); throw error }
+    return () => { stopped = true; clearInterval(timer); transport.close(); release() }
+    } catch (error) { transport.close(); release(); throw error }
   },
 }
