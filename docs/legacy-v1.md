@@ -221,10 +221,9 @@ the sampler never sees it. Releases 0.2.3 and 0.2.4 shipped the camelCase spelli
 anti-loop options were inert for both; 0.4.0 fixes it. See the "PER-MODEL REQUEST OPTIONS" note at
 the top of `src/opencode-tanzu-capabilities.js` for the trace through opencode's source.
 
-The standalone V2 provider hid this. Its `applySamplingDefaults` rewrites
-`topP`/`frequencyPenalty`/`presencePenalty` to their wire names before forwarding and passes every
-other key through unchanged, so camelCase worked there and only there. Wire spelling is correct on
-both runtimes; camelCase was supported only by the standalone V2 rewrite.
+Before 0.5.0, the standalone V2 provider hid this through an
+`applySamplingDefaults` request rewrite. That hook was removed in 0.5.0.
+Current V2 uses native model `body` fields; use wire spelling on both runtimes.
 
 #### Overriding them: `OPENCODE_TANZU_MODEL_OPTIONS_JSON`
 
@@ -345,8 +344,8 @@ npm run drift -- --probe
 — not a Homebrew install; see [When the tile swaps a model](#when-the-tile-swaps-a-model).)
 
 If the model shows up under DRIFT with a probed context, upgrade the plugin
-(`brew upgrade nkuhn-vmw/tap/opencode-tanzu && opencode-tanzu-install`, or
-`git pull && ./install.sh`) and restart opencode — the plugin's model list is
+(`brew upgrade nkuhn-vmw/tap/opencode-tanzu && opencode-tanzu-install --runtime v1`, or
+`git pull && ./install.sh --runtime v1`) and restart opencode — the plugin's model list is
 built at startup.
 
 If the probe cannot determine it, a hand-written `models` override in

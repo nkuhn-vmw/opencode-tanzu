@@ -67,6 +67,10 @@ cd opencode-tanzu
 ./bin/opencode-tanzu-v2
 ```
 
+From a clone, use `/path/to/opencode-tanzu/bin/opencode-tanzu-v2` wherever
+this guide shows `opencode-tanzu-v2`; the source installer does not add commands
+to PATH.
+
 The source installer and Homebrew installer use the same implementation.
 Node >=20 is needed to run repository tests, not to load the plugin in OpenCode.
 No npm download or build step is needed for the plugin.
@@ -114,7 +118,8 @@ Refreshes do not overlap. Failed refreshes retain the previous/configured
 catalog; an initial failure without configured models leaves no usable Tanzu
 models. A retained roster is not proof that authentication still works.
 Probing shares the bounded request budget and disk cache described in the
-[discovery reference](model-discovery.md), under the isolated V2 data root.
+[discovery reference](model-discovery.md), under the isolated V2 data root when launched through the wrapper. A manually
+configured backend uses its own XDG data root instead.
 
 Optionally set `OPENCODE_TANZU_MODEL` to a served model ID. It supplies a
 default only when the catalog has none; an explicit native `model` setting wins.
@@ -173,6 +178,33 @@ which selects the isolated XDG paths. Desktop clients must connect to that
 backend to use its plugins; these commands do not modify a desktop app's
 embedded backend. Use authenticated server configuration when exposing a
 backend beyond loopback.
+
+## Background service and desktop clients
+
+For a new wrapper-managed setup, use the same launcher for service and client
+commands so its XDG paths and Tanzu environment are consistent:
+
+```bash
+opencode-tanzu-v2 service start
+opencode-tanzu-v2 service status
+opencode-tanzu-v2 pair
+```
+
+OpenCode 2.0.18 provides `pair` to print one-time browser/app connection links.
+Use the appropriate app link to connect a compatible client to this backend.
+Treat pairing links as private credentials; do not paste them into issues.
+Desktop client pairing and embedded backends were not part of the recorded
+validation. First prove CLI inference with `run --standalone`; validate the
+client/backend connection separately before relying on it.
+
+An existing backend does not acquire these environment variables just because
+a new shell exports them. Back up its state, finish or pause active work, and
+install/configure the native plugin in the intended backend scope. For a
+wrapper-managed service that needs new startup configuration, use
+`opencode-tanzu-v2 service restart` only once its sessions are idle. Do not
+restart a working desktop service merely to test a separate CLI installation.
+The Mac validation covered an explicitly configured existing V2 background
+service in two project scopes; it did not prove automatic desktop migration.
 
 ## Upgrade and uninstall
 

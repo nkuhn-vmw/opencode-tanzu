@@ -16,8 +16,10 @@ up to about seven days. A conclusive result resets the miss count. Slow backends
 that clamp output instead of returning a limit error may remain inconclusive.
 
 The disk cache is `opencode/opencode-tanzu/discovery-cache.json` beneath the
-launcher's isolated XDG data root. With standard defaults this is
+launcher's isolated XDG data root when started through the wrapper. With
+standard wrapper defaults this is
 `~/.local/share/opencode-tanzu-v2/opencode/opencode-tanzu/discovery-cache.json`.
+A manually configured backend uses its own XDG data root instead.
 Removing only that cache forces probes again; use this deliberately because it
 can add startup latency and endpoint load. A missing or corrupt cache falls back
 to discovery, not to a successful inference claim.
