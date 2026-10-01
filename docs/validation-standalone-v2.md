@@ -1,9 +1,32 @@
 # OpenCode V2 validation
 
+## 0.5.1 — background service and project scopes
+
+Removed the process-wide setup guard so each project location can register its
+provider and model hooks. Confirmed duplicate
+native plugin entries in a real OpenCode 2.0.18 standalone process complete an
+inference without conflicting hooks; an isolated setup counter recorded exactly
+one setup for two entries with the same plugin ID. Unit coverage also checks separate setup
+contexts register independently. A Mac background-service migration also exposed
+legacy credential metadata overriding the native transport; the migration guide
+now describes backing up and removing that connection.
+
+- 154 Node checks pass, including separate context transports and cleanup.
+- Real Mac background-service sessions in home and buildpack project scopes each
+  completed inference. New DeepSeek and Qwen shell `printf` calls completed and
+  returned their markers.
+- A migrated legacy credential with a remote URL was blocked by the native
+  origin check. Its exact backed-up Tanzu record was removed via
+  `credential.remove`; the private token file and other credentials were retained.
+- No model or AI Server configuration was changed.
+- Independent bounded review: Claude Opus 5.5 (`claude-opus-5-5`). Findings about
+  context fixtures and evidence wording were addressed before release.
+
+
 ## 0.5.0 / OpenCode 2.0.18 — 2026-10-01
 
 - 154 existing/focused Node checks pass, including token rotation, redirect
-  rejection, native API registration, duplicate setup, override precedence,
+  rejection, native API registration, override precedence,
   refresh composition, installer isolation and V1 runtime rejection.
 - A real isolated 2.0.18 process returned a fixed completion through the
   authenticated token-file transport. Scoped request metadata confirmed

@@ -6,7 +6,6 @@ import { applyModelOptionsFromEnv, enrichUnknownCards, PROBE_PHASE_BUDGET_MS } f
 
 const PROVIDER_ID = "tanzu"
 import { createTransport } from "./opencode-tanzu-transport.js"
-const ACTIVE = Symbol.for("opencode.tanzu.v2.active")
 const PACKAGE = "@opencode/ai/providers/openai-compatible"
 
 export function endpoint(options = {}, env = process.env) {
@@ -89,22 +88,12 @@ export default {
   id: "opencode.provider.tanzu",
   setup: async (ctx) => {
     const options = ctx.options ?? {}
-    const identity = JSON.stringify([endpoint(options), options.apiKeyFile ?? process.env.TANZU_GENAI_API_KEY_FILE, options.model ?? process.env.OPENCODE_TANZU_MODEL, options.refreshIntervalMs ?? process.env.OPENCODE_TANZU_REFRESH_INTERVAL_MS])
-    if (globalThis[ACTIVE]) {
-      if (globalThis[ACTIVE].identity !== identity) throw new Error("Multiple Tanzu V2 plugin configurations; keep one native provider connection")
-      return
-    }
-    const owner = { identity }
-    globalThis[ACTIVE] = owner
-    const release = () => { if (globalThis[ACTIVE] === owner) delete globalThis[ACTIVE] }
     // Read configured state from the editor, never the public catalog API:
     // the editor supplies a synchronous snapshot during catalog composition.
     let configured
     let configuredModels = new Map()
     let enabled = true
-    let transport
-    try { transport = await createTransport(() => connection(options)) }
-    catch (error) { release(); throw error }
+    const transport = await createTransport(() => connection(options))
     let models = {}
     let released = Date.now()
     let stopped = false
@@ -120,7 +109,7 @@ export default {
         ?? configuredModels.get(event.model.id)
       if (current?.package && current.package !== PACKAGE) return
       if (new URL(event.request.url).origin !== new URL(transport.baseURL).origin) {
-        throw new Error("Configure Tanzu connection via plugin options or TANZU_GENAI_* variables, not providers.tanzu.settings")
+        throw new Error("Configure Tanzu connection via plugin options or TANZU_GENAI_* variables; remove conflicting providers.tanzu.settings or migrated Tanzu credentials")
       }
       await omitUnsupportedPromptCacheKey(event, { providers: { tanzu: { ...configured, models: { [event.model.id]: current } } } })
     }, { providerID: PROVIDER_ID })
@@ -179,11 +168,11 @@ export default {
     }
     await ctx.provider.reload()
     await ctx.model.reload()
-    if (!enabled || !endpoint(options)) { transport.close(); release(); return }
+    if (!enabled || !endpoint(options)) { transport.close(); return }
     await refresh()
     const timer = setInterval(() => void refresh(), refreshInterval(options.refreshIntervalMs ?? process.env.OPENCODE_TANZU_REFRESH_INTERVAL_MS))
     timer.unref?.()
-    return () => { stopped = true; clearInterval(timer); transport.close(); release() }
-    } catch (error) { transport.close(); release(); throw error }
+    return () => { stopped = true; clearInterval(timer); transport.close() }
+    } catch (error) { transport.close(); throw error }
   },
 }
