@@ -6,6 +6,7 @@ verified combination; older design notes are historical context.
 | Guide | Use it for |
 | --- | --- |
 | [Project overview](../README.md) | Quick start, adoption prerequisites and architecture. |
+| [MacBook getting started](getting-started-mac-tanzu.md) | Install V2, create an AI Models instance/key, configure the plugin and start local development. |
 | [V2 operator guide](opencode-v2.md) | Install, desktop/backend scope, migration, token rotation, configuration and troubleshooting. |
 | [Model discovery](model-discovery.md) | Served limits, cache behavior and cold-start probe cost. |
 | [Validation](validation-standalone-v2.md) | Tested behavior, dates, runtime versions and explicit limits of the evidence. |

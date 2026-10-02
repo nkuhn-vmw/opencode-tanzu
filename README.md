@@ -9,7 +9,7 @@
 [![Verified runtime](https://img.shields.io/badge/verified_OpenCode-2.0.18-45e0bd)](docs/validation-standalone-v2.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-7c5cff)](LICENSE)
 
-[Quick start](#quick-start) · [Adoption checklist](#what-an-adopter-needs) · [Configuration](docs/opencode-v2.md#configuration-and-model-limits) · [Validation](docs/validation-standalone-v2.md) · [Security](SECURITY.md)
+[Mac getting started](docs/getting-started-mac-tanzu.md) · [Quick start](#quick-start) · [Adoption checklist](#what-an-adopter-needs) · [Configuration](docs/opencode-v2.md#configuration-and-model-limits) · [Validation](docs/validation-standalone-v2.md) · [Security](SECURITY.md)
 
 Connect OpenCode to your Tanzu AI Services deployment through its
 OpenAI-compatible endpoint. The native provider discovers chat models, checks
@@ -25,6 +25,10 @@ backends need their own validation.
 | Chat models refresh automatically; embeddings and rerankers stay out of the picker. | Token files are reread for each request, allowing rotation without a restart. | Native provider, model and variant body overrides win over bundled sampling defaults. |
 
 ## Quick start
+
+New to the setup? Follow the [MacBook getting-started guide](docs/getting-started-mac-tanzu.md)
+to install OpenCode V2, create a Tanzu AI service instance and key, and verify
+your first model response and tool call.
 
 Start with an installed **OpenCode V2** executable and a service key supplied by
 your platform operator. The installer does **not** install OpenCode itself.
@@ -131,6 +135,7 @@ model converter is used by the CF V2 buildpack.
 
 ## Documentation and companion integrations
 
+- [MacBook getting started](docs/getting-started-mac-tanzu.md): runtime install, CF service provisioning, private credentials and first use.
 - [V2 operator guide](docs/opencode-v2.md): install, isolation, rotation, migration, limits and troubleshooting.
 - [Validation record](docs/validation-standalone-v2.md): what actually passed and what remains unproven.
 - [Documentation map](docs/README.md): current guides and historical design notes.
