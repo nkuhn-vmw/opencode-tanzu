@@ -453,20 +453,19 @@ export const TABLE = {
   // output 32768: when the cap is reached while the model is still reasoning
   // the reply comes back EMPTY (finish_reason "length"), so the 4096 unknown-id
   // default is unusable. Largest single response over 14 harder multi-file
-  // tasks: 5.2K tokens at low effort, 10.5K at medium, 21.9K at high. A 16K
+  // tasks: 5.8K tokens at low effort, 10.5K at medium, 24.9K at high. A 16K
   // cap would therefore cut off high-effort turns; 32768 covers all three and
   // still bounds a runaway reasoning loop, which the model card warns about.
   //
   // reasoning_effort "low": with the field unset this model runs at HIGH.
-  // Measured through the tile with opencode on 14 multi-file tasks with hidden
-  // tests, three runs each: low passed 35/42, medium 36/42, high 38/42, using
-  // 245K, 550K and 1.26M output tokens. On the six hardest tasks the split
-  // was 14, 15 and 18 of 18. With tasks as the unit that difference is not
-  // statistically established (paired p about 0.2), while the cost is: high
-  // takes about five times the time and tokens of low. So low is the default
-  // and high is the variant to pick for a hard problem; medium showed no clear
-  // gain for 2.2x the cost. A rules file, a lower temperature (0.6, 0.2) and
-  // an added verification turn did not improve the pass rate.
+  // Measured through the tile on 14 multi-file tasks with hidden tests, three
+  // runs per task and level. OpenCode 2.3.2: low 35/42, high 35/42, with high
+  // taking 7 times the wall time and 7.5 times the output tokens. opencode
+  // 1.x: low 35/42, medium 36/42, high 38/42. Pooled low 70/84, high 73/84:
+  // no accuracy difference that the data can establish, and a large cost
+  // difference. A rules file, a lower temperature (0.6, 0.2) and an added
+  // verification turn did not improve the pass rate either. The variants and
+  // the operator override stay available for whoever wants more effort.
   // Pick the level at session start: changing it mid-session makes the server
   // recompute the whole conversation (256 of 41729 prompt tokens stayed
   // cached), because the template renders the effort ahead of the system

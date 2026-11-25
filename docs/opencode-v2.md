@@ -251,10 +251,13 @@ A table row may also set an agent window below the served context. The served
 limit is still probed; the smaller of the two is advertised, and an explicit
 positive native model limit continues to override both.
 
-Inkling 2 Mini is the first row to use either. Its numbers come from runs on
-OpenCode 1.x through the Tanzu endpoint. The V2 mapping above follows the
-2.0.18 and 2.3.2 runtime source and the unit tests in this repository; it has
-not yet been exercised against a live V2 runtime.
+Inkling 2 Mini is the first row to use either. The mapping was checked on
+OpenCode 2.3.2 (real binary in a sandbox, loaded through the CF buildpack's V2
+adapter): requests carry `reasoning_effort: low` and
+`max_completion_tokens: 32768` by default, and the `medium` and `high`
+variants change the effort. On 14 multi-file tasks with hidden tests low and
+high both passed 35 of 42 runs, with high taking 7 times as long. This
+plugin's standalone V2 entry point was not part of that check.
 
 A legacy `provider` config can still appear to work in OpenCode 2.0.18 while
 omitting its model sampling options. Use the native plugin and `providers`
