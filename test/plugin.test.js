@@ -1129,7 +1129,7 @@ test("the registered Inkling entry carries the agent window, the output cap and 
         }, () => h.config(cfg)),
       )
       const entry = cfg.provider.tanzu.models[INKLING]
-      assert.deepEqual(entry.limit, { context: 131072, output: 16384 })
+      assert.deepEqual(entry.limit, { context: 131072, output: 32768 })
       assert.equal(entry.reasoning, true)
       assert.deepEqual(entry.options, { reasoningEffort: "low" })
       assert.equal(entry.attachment, true)

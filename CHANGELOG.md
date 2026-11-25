@@ -4,7 +4,7 @@
 
 ### Added
 - **Inkling 2 Mini row** (`thinkingmachines/Inkling-2-Mini`): tool calling,
-  text and image input, output limit 16384, default `reasoning_effort: low`.
+  text and image input, output limit 32768, default `reasoning_effort: low`.
   Without a row the id took the unknown-model output limit of 4096 and sent no
   effort, so the server ran at its default (high) and a turn that reached the
   cap while still reasoning came back empty.
@@ -21,12 +21,23 @@
   default is merged after a selected variant's settings and would defeat it.
 
 ### Validation
-- Unit tests only for the code paths. The Inkling numbers were measured with
-  OpenCode 1.x through a Tanzu endpoint: three small coding tasks, three
-  repetitions per effort level, all 27 passed, with 12.5K, 17.2K and 25.9K
-  output tokens at low, medium and high; six further runs with this row's
-  limits and default effort also passed. The tasks do not separate quality on hard problems. The V2 mapping
-  follows the 2.0.18 and 2.3.2 runtime source and has not been run on V2.
+- Unit tests only for the code paths.
+- The Inkling values were measured with OpenCode 1.x (sandboxed) through a
+  Tanzu endpoint on 14 multi-file Python tasks with hidden tests, written by a
+  second model and each checked to fail before and pass with a reference
+  solution; three runs per task and effort level.
+
+  | Effort | Passed | Output tokens | Largest single response |
+  | --- | --- | --- | --- |
+  | low | 35/42 | 245K | 5.2K |
+  | medium | 36/42 | 550K | 10.5K |
+  | high (what unset means) | 38/42 | 1.26M | 21.9K |
+
+  With tasks as the unit the accuracy difference is not statistically
+  established; the cost difference is. A rules file, temperature 0.6 or 0.2,
+  and an added verification turn did not change the pass rate.
+- The V2 mapping follows the 2.0.18 and 2.3.2 runtime source and has not been
+  run on V2.
 
 ## [0.5.1] — 2026-10-01
 

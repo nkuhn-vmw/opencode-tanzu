@@ -450,17 +450,23 @@ export const TABLE = {
   // model still reasons over the whole context. Not yet compared on long real
   // sessions against running uncompacted.
   //
-  // output 16384: when the cap is reached while the model is still reasoning
+  // output 32768: when the cap is reached while the model is still reasoning
   // the reply comes back EMPTY (finish_reason "length"), so the 4096 unknown-id
-  // default is unusable. The largest single response in 33 opencode runs was
-  // 2142 tokens; 16384 leaves room for a whole-file write and still bounds a
-  // runaway reasoning loop, which the model card warns about.
+  // default is unusable. Largest single response over 14 harder multi-file
+  // tasks: 5.2K tokens at low effort, 10.5K at medium, 21.9K at high. A 16K
+  // cap would therefore cut off high-effort turns; 32768 covers all three and
+  // still bounds a runaway reasoning loop, which the model card warns about.
   //
   // reasoning_effort "low": with the field unset this model runs at HIGH.
-  // Three small coding tasks x three repetitions per level through the tile:
-  // low 9/9 passed with 12.5K output tokens, medium 9/9 with 17.2K, high 9/9
-  // with 25.9K. Those tasks separate cost, not quality; harder work may want
-  // medium, which is why the picker variants and the operator override exist.
+  // Measured through the tile with opencode on 14 multi-file tasks with hidden
+  // tests, three runs each: low passed 35/42, medium 36/42, high 38/42, using
+  // 245K, 550K and 1.26M output tokens. On the six hardest tasks the split
+  // was 14, 15 and 18 of 18. With tasks as the unit that difference is not
+  // statistically established (paired p about 0.2), while the cost is: high
+  // takes about five times the time and tokens of low. So low is the default
+  // and high is the variant to pick for a hard problem; medium showed no clear
+  // gain for 2.2x the cost. A rules file, a lower temperature (0.6, 0.2) and
+  // an added verification turn did not improve the pass rate.
   // Pick the level at session start: changing it mid-session makes the server
   // recompute the whole conversation (256 of 41729 prompt tokens stayed
   // cached), because the template renders the effort ahead of the system
@@ -473,7 +479,7 @@ export const TABLE = {
     tool_call: true,
     context: 262144,
     agentContext: 131072,
-    output: 16384,
+    output: 32768,
     modalities: { input: ["text", "image"], output: ["text"] },
     options: { reasoning_effort: "low" },
   },

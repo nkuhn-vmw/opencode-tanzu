@@ -461,20 +461,20 @@ const INKLING = "thinkingmachines/Inkling-2-Mini"
 // hit the cap while still reasoning came back empty.
 test("Inkling plans with the agent window, not the served one", () => {
   const out = resolveModels([{ id: INKLING, max_model_len: 262144 }])
-  assert.deepEqual(out[INKLING].limit, { context: 131072, output: 16384 })
+  assert.deepEqual(out[INKLING].limit, { context: 131072, output: 32768 })
   assert.equal(out[INKLING].tool_call, true)
   assert.equal(out[INKLING].attachment, true)
   assert.deepEqual(out[INKLING].options, { reasoning_effort: "low" })
 })
 
 test("the agent window applies without a probe result too", () => {
-  assert.deepEqual(resolveModels([{ id: INKLING }])[INKLING].limit, { context: 131072, output: 16384 })
+  assert.deepEqual(resolveModels([{ id: INKLING }])[INKLING].limit, { context: 131072, output: 32768 })
 })
 
 // An operator's tighter --max-model-len must still win: agentContext only lowers.
 test("a served limit below the agent window still wins", () => {
   const out = resolveModels([{ id: INKLING, max_model_len: 65536 }])
-  assert.deepEqual(out[INKLING].limit, { context: 65536, output: 16384 })
+  assert.deepEqual(out[INKLING].limit, { context: 65536, output: 32768 })
   const tight = resolveModels([{ id: INKLING, max_model_len: 16384 }])
   assert.deepEqual(tight[INKLING].limit, { context: 16384, output: 8192 })
 })
