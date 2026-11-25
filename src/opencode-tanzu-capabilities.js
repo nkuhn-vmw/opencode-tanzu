@@ -105,7 +105,33 @@ export const MODEL_OPTION_SPEC = {
   presence_penalty: { min: -2, max: 2 },
   repetition_penalty: { min: 0.01, max: 2 },
   seed: { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true },
+  // The one string-valued option. Wire spelling here, like every other key;
+  // `toV1Models` and `toV2Model` translate it to what each runtime needs (see
+  // "REASONING EFFORT" below). The list is the OpenAI chat-completions
+  // vocabulary plus `max`; a backend that does not know a value rejects the
+  // request with a 400, so set only what the served model accepts.
+  reasoning_effort: { values: ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
 }
+
+/**
+ * REASONING EFFORT — why it is not just another body key.
+ *
+ * On OpenCode V1 the `@ai-sdk/openai-compatible` model builds the body as
+ *
+ *     { ...providerOptions, reasoning_effort: compatibleOptions.reasoningEffort }
+ *
+ * so a raw `reasoning_effort` in a model's `options` is overwritten (with
+ * `undefined`, i.e. dropped) by the SDK's own line, and the only spelling
+ * that reaches the wire is the SDK key `reasoningEffort`. V1 also offers its
+ * low/medium/high variant picker only for a model flagged `reasoning: true`.
+ * `toV1Models` does both translations.
+ *
+ * On OpenCode V2 the runtime's own effort variants are
+ * `{ settings: { reasoningEffort } }`, and a model `body` is merged AFTER
+ * settings. A default placed in `body` would therefore silently defeat every
+ * variant the user picks; `toV2Model` puts it in `settings` instead.
+ */
+export const REASONING_EFFORT_VARIANTS = ["low", "medium", "high"]
 
 const KNOWN_OPTION_KEYS = Object.keys(MODEL_OPTION_SPEC).join(", ")
 
@@ -119,7 +145,7 @@ const KNOWN_OPTION_KEYS = Object.keys(MODEL_OPTION_SPEC).join(", ")
  *
  * @param {unknown} raw
  * @param {{where?: string, onWarn?: (message: string) => void}} [opts]
- * @returns {Record<string, number>|undefined}
+ * @returns {Record<string, number|string>|undefined}
  */
 export function sanitizeModelOptions(raw, { where = "model options", onWarn = () => {} } = {}) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -131,6 +157,16 @@ export function sanitizeModelOptions(raw, { where = "model options", onWarn = ()
     const spec = Object.hasOwn(MODEL_OPTION_SPEC, key) ? MODEL_OPTION_SPEC[key] : undefined
     if (!spec) {
       onWarn(`${where}: unknown request option "${key}"; ignored (accepted options: ${KNOWN_OPTION_KEYS})`)
+      continue
+    }
+    if (spec.values) {
+      // The rejected value is never echoed: an operator can paste anything
+      // into this variable, including something that should not be logged.
+      if (typeof value !== "string" || !spec.values.includes(value)) {
+        onWarn(`${where}: "${key}" must be one of ${spec.values.join(", ")}; ignored`)
+        continue
+      }
+      out[key] = value
       continue
     }
     if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -401,6 +437,51 @@ export const TABLE = {
     modalities: { input: ["text", "image", "video"], output: ["text"] },
     options: { temperature: 1.0, top_p: 0.95 },
   },
+  // Thinking Machines Inkling 2 Mini, served on NDC by vLLM at max_model_len
+  // 262144 (worker config and the over-limit probe, 2026-11-25). Text + image
+  // in (image input verified through the tile). Tool calling verified in real
+  // opencode runs, including parallel calls.
+  //
+  // agentContext 131072: the window the agent should PLAN with, deliberately
+  // below what the server accepts. Measured on the worker: decode falls from
+  // 243 tok/s at a 32K context to 152 tok/s at 250K, and "add up eight
+  // scattered entries" falls from 5/5 at 8K to 1/5 at 128K while exact lookups
+  // stay 10/10 out to 250K. Compacting near 112K keeps sessions where the
+  // model still reasons over the whole context. Not yet compared on long real
+  // sessions against running uncompacted.
+  //
+  // output 32768: when the cap is reached while the model is still reasoning
+  // the reply comes back EMPTY (finish_reason "length"), so the 4096 unknown-id
+  // default is unusable. Largest single response over 14 harder multi-file
+  // tasks: 5.8K tokens at low effort, 10.5K at medium, 24.9K at high. A 16K
+  // cap would therefore cut off high-effort turns; 32768 covers all three and
+  // still bounds a runaway reasoning loop, which the model card warns about.
+  //
+  // reasoning_effort "low": with the field unset this model runs at HIGH.
+  // Measured through the tile on 14 multi-file tasks with hidden tests, three
+  // runs per task and level. OpenCode 2.3.2: low 35/42, high 35/42, with high
+  // taking 7 times the wall time and 7.5 times the output tokens. opencode
+  // 1.x: low 35/42, medium 36/42, high 38/42. Pooled low 70/84, high 73/84:
+  // no accuracy difference that the data can establish, and a large cost
+  // difference. A rules file, a lower temperature (0.6, 0.2) and an added
+  // verification turn did not improve the pass rate either. The variants and
+  // the operator override stay available for whoever wants more effort.
+  // Pick the level at session start: changing it mid-session makes the server
+  // recompute the whole conversation (256 of 41729 prompt tokens stayed
+  // cached), because the template renders the effort ahead of the system
+  // prompt.
+  //
+  // No temperature: the served default (1.0) is the vendor's.
+  "thinkingmachines/Inkling-2-Mini": {
+    kind: "chat",
+    name: "Inkling-2-Mini (Tanzu)",
+    tool_call: true,
+    context: 262144,
+    agentContext: 131072,
+    output: 32768,
+    modalities: { input: ["text", "image"], output: ["text"] },
+    options: { reasoning_effort: "low" },
+  },
 }
 
 /**
@@ -476,6 +557,20 @@ function applyServedLimit(meta, maxModelLen) {
 }
 
 /**
+ * A row's `agentContext` is the window the agent should plan with when that is
+ * deliberately smaller than what the server accepts (see the Inkling row). It
+ * only ever LOWERS the advertised context: a served limit below it still wins,
+ * so an operator's tighter --max-model-len is never overridden. Under-
+ * advertising is always safe — the agent compacts earlier; the server would
+ * have accepted more.
+ */
+function applyAgentContext(meta, entry) {
+  const cap = entry?.agentContext
+  if (typeof cap !== "number" || !isPlausibleContext(cap) || meta.limit.context <= cap) return meta
+  return { ...meta, limit: { context: cap, output: clampOutput(cap, meta.limit.output) } }
+}
+
+/**
  * @param {{id: string, max_model_len?: number|null}[]} cards
  * @returns {Record<string, object>} opencode model configs, keyed by model id
  */
@@ -492,9 +587,31 @@ export function resolveModels(cards) {
       if (NON_CHAT_ID.test(card.id)) continue // unknown non-chat: excluded
       meta = unknownDefaults(card.id)
     }
-    out[card.id] = applyServedLimit(meta, card.max_model_len)
+    out[card.id] = applyAgentContext(applyServedLimit(meta, card.max_model_len), entry)
   }
   return out
+}
+
+/**
+ * Final step for OpenCode V1 only, applied after operator overrides: turn a
+ * wire-spelled `reasoning_effort` option into what the V1 runtime acts on —
+ * the SDK key `reasoningEffort`, plus `reasoning: true` so the low/medium/high
+ * picker appears. See "REASONING EFFORT" above for why the raw key cannot be
+ * left in place. Mutates and returns `models`; entries without the option are
+ * untouched.
+ *
+ * @param {Record<string, object>} models output of `resolveModels`
+ * @returns {Record<string, object>} the same `models` object
+ */
+export function toV1Models(models) {
+  for (const entry of Object.values(models ?? {})) {
+    const effort = entry?.options?.reasoning_effort
+    if (typeof effort !== "string") continue
+    const { reasoning_effort: _wire, ...rest } = entry.options
+    entry.options = { ...rest, reasoningEffort: effort }
+    entry.reasoning = true
+  }
+  return models
 }
 
 /**

@@ -104,6 +104,7 @@ import {
   parseModelOptionsOverride,
   resolveModels,
   TABLE,
+  toV1Models,
   unknownChatIds,
 } from "./opencode-tanzu-capabilities.js"
 import { CLAMPED, discoverModels, DiscoveryError, probeContextLength, probeToolCall } from "./opencode-tanzu-discovery.js"
@@ -616,6 +617,8 @@ export const TanzuPlugin = async (input) => {
       }
 
       applyModelOptionsFromEnv(models)
+      // After the override, so an operator's reasoning_effort is translated too.
+      toV1Models(models)
 
       const existing = cfg.provider?.[PROVIDER_ID] ?? {}
       // The key goes into the IN-MEMORY config only, because that is what

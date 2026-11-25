@@ -127,6 +127,15 @@ body → model body → selected variant body**. Explicit zero and null fields a
 preserved. `OPENCODE_TANZU_MODEL_OPTIONS_JSON` changes defaults. The same native
 model converter is used by the CF V2 buildpack.
 
+A bundled row can advertise an **agent window** smaller than the served
+context (Inkling 2 Mini: 131072 of a served 262144) when measurements show the
+model works better with earlier compaction. The agent window only lowers the
+limit; a smaller served limit still wins. A row can also carry a default
+`reasoning_effort` (Inkling 2 Mini: `low`; unset, that server runs at high).
+On V1 it is sent as the SDK's `reasoningEffort` with the low/medium/high
+picker enabled; on V2 it is a model setting with matching variants. To change
+it for one model: `OPENCODE_TANZU_MODEL_OPTIONS_JSON='{"<model id>":{"reasoning_effort":"medium"}}'`.
+
 [Model limits, sampling configuration and transport details](docs/opencode-v2.md#configuration-and-model-limits)
 
 ## Documentation and companion integrations

@@ -134,3 +134,36 @@ test('native model bodies preserve provider and model overrides without mutating
   assert.deepEqual(defaults.options, { temperature: 1, top_p: 0.95, frequency_penalty: 0.5 })
   assert.equal(merged.time.released, 123)
 })
+
+// A body default would be merged after the settings of whichever variant the
+// user picks and so defeat it; the effort has to travel as a setting.
+test('a default reasoning effort becomes a setting plus picker variants, never a body field', () => {
+  const m = toV2Model('ink', { name: 'Ink', tool_call: true, limit: { context: 131072, output: 16384 }, options: { reasoning_effort: 'low', top_p: 0.9 } }, 1)
+  assert.deepEqual(m.body, { top_p: 0.9 })
+  assert.deepEqual(m.settings, { reasoningEffort: 'low' })
+  assert.deepEqual(m.variants, [
+    { id: 'low', settings: { reasoningEffort: 'low' } },
+    { id: 'medium', settings: { reasoningEffort: 'medium' } },
+    { id: 'high', settings: { reasoningEffort: 'high' } },
+  ])
+  const only = toV2Model('ink', { name: 'Ink', tool_call: true, limit: { context: 131072, output: 16384 }, options: { reasoning_effort: 'low' } }, 1)
+  assert.equal('body' in only, false)
+})
+
+test('models without a reasoning effort gain no settings and no variants', () => {
+  const m = toV2Model('ds', { name: 'DS', tool_call: true, limit: { context: 8192, output: 4096 }, options: { temperature: 1 } }, 1)
+  assert.equal('settings' in m, false)
+  assert.equal('variants' in m, false)
+  assert.deepEqual(m.body, { temperature: 1 })
+})
+
+test('existing variants and operator settings win over the bundled effort defaults', () => {
+  const model = { name: 'Ink', tool_call: true, limit: { context: 131072, output: 16384 }, options: { reasoning_effort: 'low' } }
+  const mine = [{ id: 'max', body: { reasoning_effort: 'max' } }]
+  const merged = mergeV2Model('ink', model, 1, { variants: mine, settings: { reasoningEffort: 'medium', other: 1 } })
+  assert.equal('variants' in merged, false)
+  assert.deepEqual(merged.settings, { reasoningEffort: 'medium', other: 1 })
+  const fresh = mergeV2Model('ink', model, 1, { variants: [] })
+  assert.equal(fresh.variants.length, 3)
+  assert.deepEqual(fresh.settings, { reasoningEffort: 'low' })
+})
