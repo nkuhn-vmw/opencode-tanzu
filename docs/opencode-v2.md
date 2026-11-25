@@ -233,6 +233,29 @@ The effective precedence is defaults, operator environment defaults, provider
 field wins. `OPENCODE_TANZU_MODEL_OPTIONS_JSON` changes defaults, not explicit
 body overrides. The shared converter is also used by the CF V2 buildpack.
 
+### Reasoning effort and the agent window (0.6.0)
+
+`reasoning_effort` is the one string option the bundled table and
+`OPENCODE_TANZU_MODEL_OPTIONS_JSON` accept (`none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max`; the served model decides which it knows).
+It is deliberately not written to the model `body`: OpenCode V2 builds its own
+effort variants as `settings.reasoningEffort` and merges `body` afterwards, so
+a body default would override whichever variant the user picks. The converter
+therefore sets `settings.reasoningEffort` and, for a model that has no
+variants yet, adds `low`, `medium` and `high`. An explicit model
+`body.reasoning_effort` still wins over all of them. Choose the effort when a
+session starts: on Inkling 2 Mini a change mid-session makes the server
+recompute the whole conversation.
+
+A table row may also set an agent window below the served context. The served
+limit is still probed; the smaller of the two is advertised, and an explicit
+positive native model limit continues to override both.
+
+Inkling 2 Mini is the first row to use either. Its numbers come from runs on
+OpenCode 1.x through the Tanzu endpoint. The V2 mapping above follows the
+2.0.18 and 2.3.2 runtime source and the unit tests in this repository; it has
+not yet been exercised against a live V2 runtime.
+
 A legacy `provider` config can still appear to work in OpenCode 2.0.18 while
 omitting its model sampling options. Use the native plugin and `providers`
 configuration. Do not paste the old V1 plugin into V2. No global trace logging

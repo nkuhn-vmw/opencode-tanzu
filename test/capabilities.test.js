@@ -10,6 +10,8 @@ import {
   sanitizeModelOptions,
   parseModelOptionsOverride,
   applyModelOptions,
+  toV1Models,
+  REASONING_EFFORT_VARIANTS,
 } from "../src/opencode-tanzu-capabilities.js"
 
 const QWEN = "cyankiwi/Qwen3.6-27B-AWQ-INT4"
@@ -286,7 +288,12 @@ function collector() {
 // never saw them. The anti-loop fix was inert for two releases. Wire spelling
 // is the contract; this test is the guard against regressing to camelCase.
 test("bundled options use OpenAI-compatible WIRE spelling, never AI SDK CallSettings spelling", () => {
-  const out = resolveModels([{ id: DS_ID }, { id: "Qwen/Qwen3.8-27B-FP8" }, { id: "deepseek-ai/Future" }])
+  const out = resolveModels([
+    { id: DS_ID },
+    { id: "Qwen/Qwen3.8-27B-FP8" },
+    { id: "deepseek-ai/Future" },
+    { id: "thinkingmachines/Inkling-2-Mini" },
+  ])
   for (const [id, meta] of Object.entries(out)) {
     if (!meta.options) continue
     for (const key of Object.keys(meta.options)) {
@@ -317,7 +324,7 @@ test("resolveModels hands out a copy of the table's options, not the table's obj
 test("sanitizeModelOptions accepts every spec key at its range edges", () => {
   const { seen, onWarn } = collector()
   const raw = {}
-  for (const [key, spec] of Object.entries(MODEL_OPTION_SPEC)) raw[key] = spec.min
+  for (const [key, spec] of Object.entries(MODEL_OPTION_SPEC)) raw[key] = spec.values ? spec.values[0] : spec.min
   assert.deepEqual(sanitizeModelOptions(raw, { onWarn }), raw)
   assert.deepEqual(seen, [])
 })
@@ -440,4 +447,93 @@ test("rejected sampling values never appear in validation diagnostics", () => {
   assert.deepEqual(clean, {})
   assert.equal(warnings.length, 2)
   assert.ok(warnings.every(message => !message.includes("secret-sentinel")))
+})
+
+// ---------------------------------------------------------------------------
+// Inkling 2 Mini: an agent window below the served window, a real output cap,
+// and a default reasoning effort.
+// ---------------------------------------------------------------------------
+
+const INKLING = "thinkingmachines/Inkling-2-Mini"
+
+// REGRESSION: with no row this id fell to the unknown-id output of 4096 and
+// carried no effort, so the server ran at its default (high) and a turn that
+// hit the cap while still reasoning came back empty.
+test("Inkling plans with the agent window, not the served one", () => {
+  const out = resolveModels([{ id: INKLING, max_model_len: 262144 }])
+  assert.deepEqual(out[INKLING].limit, { context: 131072, output: 16384 })
+  assert.equal(out[INKLING].tool_call, true)
+  assert.equal(out[INKLING].attachment, true)
+  assert.deepEqual(out[INKLING].options, { reasoning_effort: "low" })
+})
+
+test("the agent window applies without a probe result too", () => {
+  assert.deepEqual(resolveModels([{ id: INKLING }])[INKLING].limit, { context: 131072, output: 16384 })
+})
+
+// An operator's tighter --max-model-len must still win: agentContext only lowers.
+test("a served limit below the agent window still wins", () => {
+  const out = resolveModels([{ id: INKLING, max_model_len: 65536 }])
+  assert.deepEqual(out[INKLING].limit, { context: 65536, output: 16384 })
+  const tight = resolveModels([{ id: INKLING, max_model_len: 16384 }])
+  assert.deepEqual(tight[INKLING].limit, { context: 16384, output: 8192 })
+})
+
+test("rows without an agent window still take the served limit as it is", () => {
+  const out = resolveModels([{ id: "poolside/Laguna-S-2.1-INT4", max_model_len: 262144 }])
+  assert.equal(out["poolside/Laguna-S-2.1-INT4"].limit.context, 262144)
+})
+
+test("reasoning_effort accepts exactly its listed values and never echoes a rejected one", () => {
+  for (const value of MODEL_OPTION_SPEC.reasoning_effort.values) {
+    assert.deepEqual(sanitizeModelOptions({ reasoning_effort: value }), { reasoning_effort: value })
+  }
+  for (const bad of ["secret-sentinel", "LOW", 1, null, { level: "low" }]) {
+    const { seen, onWarn } = collector()
+    assert.deepEqual(sanitizeModelOptions({ reasoning_effort: bad, top_p: 0.9 }, { onWarn }), { top_p: 0.9 })
+    assert.equal(seen.length, 1)
+    assert.ok(seen[0].includes('"reasoning_effort" must be one of'))
+    assert.ok(!seen[0].includes("secret-sentinel"))
+  }
+})
+
+test("an operator can raise the effort for one model through the override", () => {
+  const models = resolveModels([{ id: INKLING }])
+  applyModelOptions(models, parseModelOptionsOverride(`{"${INKLING}":{"reasoning_effort":"medium"}}`))
+  assert.deepEqual(models[INKLING].options, { reasoning_effort: "medium" })
+  // ...and the table itself is untouched.
+  assert.deepEqual(resolveModels([{ id: INKLING }])[INKLING].options, { reasoning_effort: "low" })
+})
+
+// The V1 SDK overwrites a raw reasoning_effort with its own (unset) value, so
+// only the SDK key reaches the wire, and only a reasoning-flagged model gets
+// the low/medium/high picker.
+test("toV1Models turns the wire option into the SDK key and flags the model", () => {
+  const models = resolveModels([{ id: INKLING }, { id: DS_ID }, { id: QWEN }])
+  const before = structuredClone({ ds: models[DS_ID], qwen: models[QWEN] })
+  assert.equal(toV1Models(models), models)
+  assert.deepEqual(models[INKLING].options, { reasoningEffort: "low" })
+  assert.equal(models[INKLING].reasoning, true)
+  assert.deepEqual(models[DS_ID], before.ds)
+  assert.deepEqual(models[QWEN], before.qwen)
+  assert.equal("reasoning" in models[DS_ID], false)
+})
+
+test("toV1Models keeps sampling options next to the translated effort", () => {
+  const models = resolveModels([{ id: DS_ID }])
+  applyModelOptions(models, { [DS_ID]: { reasoning_effort: "high" } })
+  toV1Models(models)
+  assert.deepEqual(models[DS_ID].options, { temperature: 1, top_p: 0.95, frequency_penalty: 0.5, reasoningEffort: "high" })
+  assert.equal(models[DS_ID].reasoning, true)
+})
+
+test("toV1Models tolerates an empty or missing roster", () => {
+  assert.deepEqual(toV1Models({}), {})
+  assert.equal(toV1Models(undefined), undefined)
+})
+
+test("the picker variants are a subset of the accepted efforts", () => {
+  for (const level of REASONING_EFFORT_VARIANTS) {
+    assert.ok(MODEL_OPTION_SPEC.reasoning_effort.values.includes(level))
+  }
 })

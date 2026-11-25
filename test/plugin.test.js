@@ -1110,3 +1110,41 @@ test("applyModelOptionsFromEnv logs one line per model that carries options", as
   assert.equal(applied.length, 1)
   assert.ok(applied[0].includes("applied model options for a: {\"temperature\":0.5}"))
 })
+
+// End to end through the V1 config hook: what opencode 1.x is actually handed.
+test("the registered Inkling entry carries the agent window, the output cap and a V1-shaped default effort", async () => {
+  const INKLING = "thinkingmachines/Inkling-2-Mini"
+  await withDataHome(() =>
+    withEnv({ ...NO_ENV, OPENCODE_TANZU_MODEL_OPTIONS_JSON: undefined }, async () => {
+      const cfg = { provider: { tanzu: { options: { baseURL: BASE, apiKey: "k" } } } }
+      const h = await hooks()
+      await withCapturedLog(() =>
+        withFetch(async (req) => {
+          const url = typeof req === "string" ? req : req.url
+          if (String(url).endsWith("/models")) return jsonResponse({ data: [{ id: INKLING }] })
+          return jsonResponse(
+            { error: { message: "max_tokens=999999999 cannot be greater than max_model_len=262144." } },
+            400,
+          )
+        }, () => h.config(cfg)),
+      )
+      const entry = cfg.provider.tanzu.models[INKLING]
+      assert.deepEqual(entry.limit, { context: 131072, output: 16384 })
+      assert.equal(entry.reasoning, true)
+      assert.deepEqual(entry.options, { reasoningEffort: "low" })
+      assert.equal(entry.attachment, true)
+    }),
+  )
+})
+
+test("an operator override of the effort reaches the V1 entry in SDK spelling", async () => {
+  const INKLING = "thinkingmachines/Inkling-2-Mini"
+  await withDataHome(() =>
+    withEnv({ ...NO_ENV, OPENCODE_TANZU_MODEL_OPTIONS_JSON: `{"${INKLING}":{"reasoning_effort":"medium"}}` }, async () => {
+      const cfg = { provider: { tanzu: { options: { baseURL: BASE, apiKey: "k" } } } }
+      const h = await hooks()
+      await withCapturedLog(() => withFetch(async () => jsonResponse({ data: [{ id: INKLING }] }), () => h.config(cfg)))
+      assert.deepEqual(cfg.provider.tanzu.models[INKLING].options, { reasoningEffort: "medium" })
+    }),
+  )
+})

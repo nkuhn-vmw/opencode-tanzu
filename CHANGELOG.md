@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.0] — 2026-11-25
+
+### Added
+- **Inkling 2 Mini row** (`thinkingmachines/Inkling-2-Mini`): tool calling,
+  text and image input, output limit 16384, default `reasoning_effort: low`.
+  Without a row the id took the unknown-model output limit of 4096 and sent no
+  effort, so the server ran at its default (high) and a turn that reached the
+  cap while still reasoning came back empty.
+- **Agent window.** A row can set `agentContext`, the context the agent should
+  plan with when that is deliberately below what the server accepts. It only
+  lowers the advertised limit; a smaller served limit still wins. Inkling 2
+  Mini advertises 131072 of a served 262144.
+- **`reasoning_effort`** as a bundled and operator-settable option
+  (`OPENCODE_TANZU_MODEL_OPTIONS_JSON`), validated against a fixed list; a
+  rejected value is never echoed. V1 receives it as the SDK key
+  `reasoningEffort` with `reasoning: true` (a raw `reasoning_effort` option is
+  overwritten by the V1 SDK). V2 receives it as `settings.reasoningEffort`
+  with `low`/`medium`/`high` variants, not as a body field, because a body
+  default is merged after a selected variant's settings and would defeat it.
+
+### Validation
+- Unit tests only for the code paths. The Inkling numbers were measured with
+  OpenCode 1.x through a Tanzu endpoint: three small coding tasks, three
+  repetitions per effort level, all 27 passed, with 12.5K, 17.2K and 25.9K
+  output tokens at low, medium and high; six further runs with this row's
+  limits and default effort also passed. The tasks do not separate quality on hard problems. The V2 mapping
+  follows the 2.0.18 and 2.3.2 runtime source and has not been run on V2.
+
 ## [0.5.1] — 2026-10-01
 
 - Remove the process-wide setup guard so separate V2 project scopes register
